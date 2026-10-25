@@ -1,0 +1,1 @@
+{"running":[{"model":"halogen","state":"ready","cmd":"docker compose -f /home/rute/ai/projgit/halogen-qwen38-flash/compose.yaml up halogen","proxy":"http://127.0.0.1:8731","ttl":0,"name":"","description":""}]}

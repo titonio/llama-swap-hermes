@@ -1,0 +1,6 @@
+{
+  "engine_empty_messages": {"status": 400, "body": {"error": {"message": "'messages' must be a non-empty array", "type": "invalid_request_error", "param": "messages", "code": null}}},
+  "engine_negative_max_tokens": {"status": 400, "body": {"error": {"message": "'max_tokens' must be >= 1, got -5", "type": "invalid_request_error", "param": "max_tokens", "code": null}}},
+  "engine_chat_template": {"status": 400, "body": {"error": {"message": "render_chat (/src/serve/chat_template.cpp:230): check `last_query >= 0` failed: chat template: No user query found in messages.", "type": "invalid_request_error", "param": "messages", "code": null}}},
+  "swap_no_router": {"status": 404, "body": {"src": "llama-swap", "error": {"message": "no router for requested model", "type": "invalid_request_error", "param": null, "code": "not_found"}}}
+}
