@@ -175,20 +175,24 @@ def test_get_json_refuses_a_redirect_without_replaying_the_credential():
     # a real 302 from a loopback http.server: None, the target never fetched, no second
     # Authorization header. This is the credential-leak path; it is tested, not reasoned about.
 def test_get_json_returns_none_on_unreachable_or_malformed_base():
-    # a closed loopback port, "not a url", "http://h:99999/v1", "h:8080/v1", "", "ftp://h/v1"
-    # — every one returns None. The malformed ones are the regression guard: urllib raises
-    # ValueError for some of them at Request-construction time, outside the try.
+    # a closed loopback port, "not a url", "http://h.invalid:99999/v1", "h.invalid:8080/v1", "",
+    # "ftp://h.invalid/v1" — every one returns None. Use `.invalid` (RFC 2606: never resolvable):
+    # a bare "h" costs a real getaddrinfo round trip (~4 s here, and `timeout` does not bound DNS),
+    # which would make the whole suite 200× slower for no reason. The malformed ones are the
+    # regression guard: urllib raises ValueError for some of them at Request-construction time,
+    # outside the try.
 def test_env_readers_fall_back_on_junk():
     assert env_int({"LLAMA_SWAP_CATALOG_TTL_S": "soon"}, "LLAMA_SWAP_CATALOG_TTL_S", 60) == 60
-    assert env_int({}, "LLAMA_SWAP_CATALOG_TTL_S", 60) == 60          # absent → default, not 0
-    assert env_str({"LLAMA_SWAP_BASE_URL": "  http://h:1/v1/  "}, "LLAMA_SWAP_BASE_URL", "") == "http://h:1/v1/"
+    assert env_int({}, "LLAMA_SWAP_CATALOG_TTL_S", 60) == 60          # absent → default, never 0
+    assert env_int({"LLAMA_SWAP_MIN_OUTPUT_TOKENS": "1024"}, "LLAMA_SWAP_MIN_OUTPUT_TOKENS", 1024) == 1024
+    assert env_str({"LLAMA_SWAP_BASE_URL": "  http://h.invalid:1/v1/  "}, "LLAMA_SWAP_BASE_URL", "") == "http://h.invalid:1/v1/"
 def test_root_url_derives_server_root_from_base():
     assert root_url("http://192.168.31.7:8080/v1") == "http://192.168.31.7:8080"
     assert root_url("http://192.168.31.7:8080/") == "http://192.168.31.7:8080"
     assert root_url("http://host:9000/api") == "http://host:9000/api"
 ```
 
-The two `...`-argument tests are written out in full by the implementer (stub the opener the way the first four do); the point of naming them here is that the **redirect and malformed-URL paths are covered by committed tests**, not by a throwaway loopback script — they are the paths the spec's anti-goals turn on, and a later refactor of the `try` boundary is exactly what would break them silently.
+The two `...`-argument tests are written out in full by the implementer (stub the opener the way the first four do); the point of naming them here is that the **redirect and malformed-URL paths are covered by committed tests**, not by a throwaway loopback script — they are the paths the spec's anti-goals turn on, and a later refactor of the `try` boundary is exactly what would break them silently. This list is the complete set: **8 test functions, 8 passed** — do not leave a superseded test alongside its replacement to hit a number.
 
 - [ ] **Step 2: Run them to verify they fail**
 
@@ -202,7 +206,7 @@ Expected: collection error, `ModuleNotFoundError: No module named 'client'`.
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `python3 -m pytest tests/test_client.py -v`
-Expected: 9 passed.
+Expected: 8 passed.
 
 - [ ] **Step 5: Commit**
 
