@@ -19,6 +19,10 @@
 - No model id, context window, or capability is hardcoded anywhere. The literal `192.168.31.7:8080` appears once, as the `LLAMA_SWAP_BASE_URL` default.
 - Every endpoint beyond `/v1/models` is optional: a 404/410/5xx or an unparseable body degrades to "unknown", never to an error. (Verified: the running build has no `/props` and no `/v1/messages`.)
 - Env knobs and defaults, verbatim: `LLAMA_SWAP_BASE_URL` = `http://192.168.31.7:8080/v1`, `LLAMA_SWAP_API_KEY` (unset), `LLAMA_SWAP_CATALOG_TTL_S` = `60`, `LLAMA_SWAP_PROBE_TIMEOUT_S` = `3`, `LLAMA_SWAP_DEFAULT_MAX_TOKENS` = `8192`, `LLAMA_SWAP_MIN_OUTPUT_TOKENS` = `1024`. A malformed numeric value falls back to its default.
+- Test command: `python3 -m pytest <path> -q`. The system `python3` has **no** pytest; pytest 9 is installed only for the Hermes-managed interpreter, so run tests as
+  `/home/hermes/.hermes/tools/python-3.14.7+20260901-linux-x64/bin/python3 -m pytest …`, and add
+  `PYTHONPATH="/home/hermes/.hermes/hermes-agent:/home/hermes/.hermes/installs/019d0d114d22b7e6/environments/948e0e5d652f48a5af57a34335d9fa11/venv/lib/python3.14/site-packages"`
+  for the tests that import Hermes modules (Tasks 4 and 7). Without that path the Hermes-dependent tests skip, which is a pass — so the Hermes-backed run is the one that counts.
 - Commit after every task with an imperative subject (`feat:`/`fix:`/`test:`/`docs:`).
 
 ## Review Focus
@@ -203,8 +207,8 @@ git add client.py tests/test_client.py && git commit -m "feat: add bounded stdli
   - `parse_running(payload: Any) -> frozenset[str]` — ids whose entry has `state == "ready"`.
   - `mark_loaded(infos: dict[str, ModelInfo], ready: frozenset[str]) -> None` — sets `.loaded` in place (also true for an alias of a ready id, matching `meta.llamaswap.aliases`).
   - `capabilities_entry(info: ModelInfo) -> dict[str, Any]` — only the keys the server reported, using Hermes' `model_overrides` names: `supports_tools`, `supports_vision`, `context_window`.
-  - `EFFORT_LADDER_FALLBACK: tuple[str, ...]` = `("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")` — Hermes' ladder, duplicated deliberately with a comment naming `agent/reasoning_effort.EFFORT_LADDER` as the source of truth.
-  - `supported_efforts(info: ModelInfo, ladder: Sequence[str] = EFFORT_LADDER_FALLBACK) -> tuple[str, ...] | None` — the tri-state contract from `providers/base.py`: `None` = model said nothing (or nothing it said is on the ladder), `()` = reasoning disabled, else the filtered tuple in ladder order.
+  - `EFFORT_LADDER_FALLBACK: tuple[str, ...]` = `("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")` — used **only** when `agent.reasoning_effort.EFFORT_LADDER` cannot be imported (the plugin must stay importable without Hermes). `supported_efforts` imports the real ladder inside the function and prefers it; the local tuple is the fallback, with a comment naming that file as the source of truth.
+  - `supported_efforts(info: ModelInfo, ladder: Sequence[str] | None = None) -> tuple[str, ...] | None` — `None` selects the imported-or-fallback ladder. The tri-state contract from `providers/base.py`: `None` = model said nothing (or nothing it said is on the ladder), `()` = reasoning disabled, else the filtered tuple in ladder order.
   - `fetch_catalog(base_url: str, api_key: str | None, timeout: float) -> tuple[dict[str, ModelInfo], str | None]` — one `/models` GET plus one best-effort `{root}/running` GET; returns `(infos, error)` where `error` is a short string when `/models` failed and `infos` is empty. Never raises.
 
 - [ ] **Step 1: Write the failing tests against the captured fixtures**
@@ -396,6 +400,7 @@ git add errors.py tests/test_errors.py tests/fixtures/errors.json && git commit 
   - `build_profile(env: Mapping[str, str]) -> LlamaSwapProfile`
   - `profile.warm(*, base_url: str | None = None, timeout: float | None = None, force: bool = False) -> dict[str, ModelInfo]` — the single place that does HTTP for the catalog; caches by normalized base URL; on failure caches the failure for the TTL.
   - Module-level cache accessor `catalog_for(profile, model: str) -> ModelInfo | None` (used by the tests and by Tasks 6-8 hooks).
+  - `LlamaSwapProfile.classify_api_error(error, *, status_code, error_code, message, body, model)` — thin delegation to `errors.classify_llama_swap_error` (Task 4), wrapped so a raised exception inside the rules degrades to `None`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -465,14 +470,23 @@ def test_ttl_expiry_triggers_a_second_fetch(swap, calls, clock):
 
 def test_registers_a_single_profile_at_import():
     assert providers.REGISTRY["llama-swap"] is providers.REGISTRY["swap"]
+
+def test_error_hook_delegates_and_never_raises(swap, monkeypatch):
+    from errors import classify_llama_swap_error
+    case = CORPUS["swap_no_router"]
+    assert swap.classify_api_error(None, **_kwargs(case)) == classify_llama_swap_error(**_kwargs(case))
+    monkeypatch.setattr(errors, "classify_llama_swap_error", lambda **kw: 1 / 0)
+    assert swap.classify_api_error(None, status_code=400, error_code="", message="", body={}, model="x") is None
 ```
+
+`_kwargs` and `CORPUS` are Task 4's; move them into `tests/conftest.py` here so both files share them.
 
 - [ ] **Step 2: Run them to verify they fail**
 
 Run: `python3 -m pytest tests/test_profile.py -v`
 Expected: collection error, `ModuleNotFoundError: No module named 'profile'`.
 
-- [ ] **Step 3: Implement `warm`, `fetch_models`, `get_model_context_length` and the capability refresh in `profile.py`**
+- [ ] **Step 3: Implement `warm`, `fetch_models`, `get_model_context_length`, `classify_api_error` and the capability refresh in `profile.py`**
 
 Cache shape: `{base_url: {"at": float, "infos": dict[str, ModelInfo], "failed": bool}}` guarded by one `threading.Lock`, and per-`$HERMES_HOME` only if the module-level dict is shared across profiles in a way the bundled `router` plugin guards against — it is not here (one profile instance per process), so a plain module dict plus the lock is enough; note that in a comment. `fetch_models` returns `None` on failure (never `[]`, so Hermes keeps its own fallback path), `list(infos)` in server order on success. `get_model_context_length` calls `warm()` only when the shard is absent (bounded by `LLAMA_SWAP_PROBE_TIMEOUT_S`), and answers cache-only otherwise. The capability refresh replaces the contents of the existing `model_capabilities` dict in place (`clear()` + `update()`) — `agent/models_dev.py` reads it by reference on every lookup, so a rebound dict would be missed.
 
