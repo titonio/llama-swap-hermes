@@ -60,8 +60,11 @@ def test_get_json_returns_parsed_body_on_200(monkeypatch):
     request = opener.requests[0]
     assert request.full_url == "http://192.168.31.7:8080/v1/models"
     assert request.get_method() == "GET"
-    # The caller's timeout reaches the transport; it is never a literal here.
-    assert opener.timeouts == [3.0]
+
+    client.get_json(client.DEFAULT_BASE_URL, "/models", timeout=9.5)
+    # Both the default and an explicit caller timeout reach the transport, so a
+    # literal hardcoded in the open call turns this red.
+    assert opener.timeouts == [3.0, 9.5]
 
 
 def test_get_json_returns_none_on_404(monkeypatch):
@@ -69,6 +72,14 @@ def test_get_json_returns_none_on_404(monkeypatch):
         monkeypatch,
         urllib.error.HTTPError("http://192.168.31.7:8080/v1/models", 404, "Not Found", {}, None),
     )
+
+    assert client.get_json(client.DEFAULT_BASE_URL, "/models") is None
+
+
+def test_get_json_returns_none_on_non_2xx_status(monkeypatch):
+    # A 200-shaped response object carrying a 502: the status check inside
+    # get_json, which the 404 test cannot reach because urllib raises there.
+    _stub_opener(monkeypatch, _Response(b'{"error": "bad gateway"}', status=502))
 
     assert client.get_json(client.DEFAULT_BASE_URL, "/models") is None
 
