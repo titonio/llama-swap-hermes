@@ -494,8 +494,7 @@ def test_ttl_expiry_triggers_a_second_fetch(swap, calls, clock):
     swap.fetch_models()
     assert len(calls) > n
 
-```python
-# tests/test_profile.py — mirrors the sibling's test_package_import_registers_provider
+# Mirrors the sibling's test_package_import_registers_provider
 # (halogen-hermes/tests/test_profile.py:152-169) but asserts through the PUBLIC API, and is gated
 # to the stub: under a real Hermes checkout the same registration would land in the process-wide
 # registry and leak into every other test that classifies as provider="llama-swap" — including
@@ -510,6 +509,7 @@ def test_package_import_registers_provider():
     )
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
+    saved = dict(providers.REGISTRY)          # snapshot for the restore below
     try:
         spec.loader.exec_module(module)
         # NOT providers.REGISTRY — that name exists only in the test stub; the real module keeps
@@ -520,8 +520,10 @@ def test_package_import_registers_provider():
     finally:
         for name in [n for n in sys.modules if n.startswith(module_name)]:
             sys.modules.pop(name, None)
-        # unregister: the stub's registry is module-global, so restore it for later tests
+        # unregister: the stub registry is module-global, so restore the snapshot rather
+        # than leaving this test's profile registered for the rest of the session.
         providers.REGISTRY.clear()
+        providers.REGISTRY.update(saved)
 ```
 
 The stub in `tests/conftest.py` must therefore grow a third export alongside `ProviderProfile` and
@@ -536,6 +538,8 @@ the absolute `from profile import …` fallback is for flat test imports only, a
 stdlib module in this interpreter (`lib/python3.14/profile.py`), so if it ever won the race the
 failure would be a confusing `AttributeError` on a profiler module rather than a clean ImportError.
 
+
+```python
 # And LlamaSwapProfile declares `api_mode: str = "chat_completions"` explicitly, with a one-line
 # comment that it restates the built-in rather than overriding it: the stub's ProviderProfile is a
 # plain kwargs-copying class with no dataclass defaults (providers/base.py:53-56 holds the real ones),
