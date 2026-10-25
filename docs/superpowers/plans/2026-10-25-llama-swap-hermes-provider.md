@@ -597,7 +597,12 @@ def test_supported_reasoning_efforts_is_per_model_not_server_wide(swap):
     assert swap.supported_reasoning_efforts("strixite")[-1] == "xhigh"
 
 def test_model_publishing_nothing_has_no_declared_vocabulary(swap):
-    assert swap.supported_reasoning_efforts("gufo") is None
+    stub_models(swap, {"quiet": _info("quiet")})       # no reasoning block at all
+    assert swap.supported_reasoning_efforts("quiet") is None
+
+# NOT gufo: the captured server publishes a full reasoning vocabulary for every model,
+# including gufo (verified against tests/fixtures/models.json). "Reports no capabilities"
+# and "reports no reasoning vocabulary" are different facts, and only the second is unknown here.
 
 def test_aux_prefers_an_already_loaded_model(swap):
     assert swap.resolve_aux_model() == ready_ids()[0]   # the fixture's one ready model
