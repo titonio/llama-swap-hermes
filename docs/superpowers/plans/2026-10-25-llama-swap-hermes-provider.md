@@ -396,8 +396,9 @@ Then re-run Step 2 for the new cases. If the server **silently clamps** instead 
 
 Two rules, both narrow (the `halogen-hermes` precedent: it claims only the 400 budget branch and leaves 401/403/429/5xx to core). Add a rule **only if Step 2 or Step 3 shows core getting that case wrong** — a rule that reproduces core's own verdict is dead code and Hermes' precedence comment says so:
 
-1. llama-swap's own dispatch failures — identified by `body["src"] == "llama-swap"` with `code == "not_found"` — return `None`, and the test asserts that Step 2 recorded `model_not_found` for it: "no router for requested model" is a wrong-model-id condition, and core's verdict is already right.
-2. Context-overflow wordings the corpus proves core misses → `{"reason": "context_overflow", "should_compress": True}`. Only add the specific substrings measured in Step 2/3, each with a comment naming the captured case it came from.
+1. llama-swap's own dispatch failures — identified by `body["src"] == "llama-swap"` with `code == "not_found"` — return `{"reason": "model_not_found", "retryable": False, "should_fallback": True}`, mirroring core's own `_V_MODEL_NOT_FOUND` / `_ABORT_FALLBACK`. Step 2 **measured** core to get this case wrong: `_MODEL_NOT_FOUND_PATTERNS` (`agent/error_classifier.py:273-280`) has no "no router" wording, and `_model_id_missing_known_prefix` is False for a provider the curated catalogue doesn't know (`:1471` — deliberately, so genuine endpoint problems stay retryable `unknown`). A wrong or renamed model id is therefore retried to exhaustion instead of aborting to the fallback chain.
+   _This corrects an earlier draft of this plan, which asserted core's verdict was already right. It was asserted, not measured — which is what Step 2 is for._
+2. Context-overflow wordings the corpus proves core misses → `{"reason": "context_overflow", "should_compress": True}`. Only add the specific substrings measured in Step 2/3, each with a comment naming the captured case it came from. If Step 3 shows the stack **truncating or silently clamping** instead of erroring, there is no body to earn a rule from and this rule is **not implemented** — record that outcome in the corpus and rely on the declared cap (Task 6) plus Hermes' own reactive path.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
