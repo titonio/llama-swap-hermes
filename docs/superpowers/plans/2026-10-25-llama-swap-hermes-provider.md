@@ -699,6 +699,16 @@ git add profile.py tests/test_profile.py && git commit -m "feat: declare per-mod
 
 ### Task 7: Wire hooks — and the no-`max_tokens` guarantee
 
+**Read this before writing anything: the guarantee is about the plugin's own wire hooks, not about
+`get_max_tokens`.** Hermes' precedence already implements it — `_apply_max_tokens`
+(`agent/transports/chat_completions.py:339-347`) returns as soon as it finds `ephemeral_max_output_tokens`
+or `max_tokens` in `params`, and only then applies `profile_max`. So the requirement is: (a)
+`build_api_kwargs_extras` / `build_extra_body` must never add `max_tokens` (or `max_completion_tokens`) of
+their own, and (b) the integration test asserts that a caller-supplied budget **survives** — Hermes'
+reactive clamp and compression budgets must not be overridden by the plugin's declared cap. Returning
+`None` from `get_max_tokens` to "never send `max_tokens`" would be wrong: that is Task 6's declared cap
+and it is supposed to reach the wire when the caller named none.
+
 **Files:**
 - Modify: `profile.py`; Create: `tests/test_wire.py`
 
