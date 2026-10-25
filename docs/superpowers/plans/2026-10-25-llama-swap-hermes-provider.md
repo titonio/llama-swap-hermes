@@ -668,7 +668,7 @@ Expected: FAIL with `AttributeError` on each new hook.
 
 - [ ] **Step 3: Implement the hooks**
 
-`get_max_tokens(model)` looks the id up through `catalog_for` (which never does HTTP from here — the shard is already warm by the time Hermes asks, and if it is not, `None` is the honest answer) and returns `output_cap(window, self.default_max_tokens, self.min_output_tokens)`, those two fields read from `LLAMA_SWAP_DEFAULT_MAX_TOKENS` / `LLAMA_SWAP_MIN_OUTPUT_TOKENS` in `build_profile`. `resolve_aux_model` / `default_vision_model` must cache their answer for the TTL — `providers/base.py` requires it of both — and return `""` / `None` when the catalog says nothing.
+`get_max_tokens(model)` looks the id up through `catalog_for` (which never does HTTP from here — the shard is already warm by the time Hermes asks, and if it is not, `None` is the honest answer) and returns `output_cap(window, self.default_max_tokens, self.min_output_tokens)`, those two fields read from `LLAMA_SWAP_DEFAULT_MAX_TOKENS` / `LLAMA_SWAP_MIN_OUTPUT_TOKENS` in `build_profile`. `resolve_aux_model` must cache its answer for the TTL — `providers/base.py:176` states the contract outright ("cheap to call (implementations must cache — this runs on client-resolution paths), never raises, and returns `\"\"` when it has no answer"). `default_vision_model` carries no such requirement in its docstring (`:250-258`), but it is resolved on the same paths, so cache it the same way; say that in the comment rather than claiming base mandates it. Return `""` / `None` when the catalog says nothing.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
