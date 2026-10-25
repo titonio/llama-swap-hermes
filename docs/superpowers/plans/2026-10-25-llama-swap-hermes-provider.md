@@ -494,16 +494,47 @@ def test_ttl_expiry_triggers_a_second_fetch(swap, calls, clock):
     swap.fetch_models()
     assert len(calls) > n
 
-def test_registration_is_visible_through_the_public_api():
-    # NOT providers.REGISTRY — that name exists only in the test stub; the real module keeps
-    # _REGISTRY private (providers/__init__.py:55) and exposes get_provider_profile (:192).
-    from providers import get_provider_profile
-    assert get_provider_profile("llama-swap") is get_provider_profile("swap") is p
+```python
+# tests/test_profile.py — mirrors the sibling's test_package_import_registers_provider
+# (halogen-hermes/tests/test_profile.py:152-169) but asserts through the PUBLIC API, and is gated
+# to the stub: under a real Hermes checkout the same registration would land in the process-wide
+# registry and leak into every other test that classifies as provider="llama-swap" — including
+# Task 4's, whose whole point is measuring core without this plugin in the way.
+@needs_stub_registry
+def test_package_import_registers_provider():
+    # Mirror Hermes' user-plugin loader: __init__.py as a package whose submodule search path is
+    # the plugin dir (providers/__init__.py:479-493 uses spec_from_file_location + a per-home name).
+    module_name = "llama_swap_plugin_under_test"
+    spec = importlib.util.spec_from_file_location(
+        module_name, ROOT / "__init__.py", submodule_search_locations=[str(ROOT)]
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+        # NOT providers.REGISTRY — that name exists only in the test stub; the real module keeps
+        # _REGISTRY private (providers/__init__.py:55) and exposes get_provider_profile (:192).
+        from providers import get_provider_profile
+        assert get_provider_profile("llama-swap") is not None
+        assert get_provider_profile("llama-swap") is get_provider_profile("swap")
+    finally:
+        for name in [n for n in sys.modules if n.startswith(module_name)]:
+            sys.modules.pop(name, None)
+        # unregister: the stub's registry is module-global, so restore it for later tests
+        providers.REGISTRY.clear()
+```
 
-# The stub in tests/conftest.py must therefore grow a third export alongside ProviderProfile and
-# register_provider: `get_provider_profile(name)` returning REGISTRY.get(name). Add it in this task,
-# with a comment saying it mirrors providers/__init__.py:192 so the same assertion passes with and
-# without Hermes installed.
+The stub in `tests/conftest.py` must therefore grow a third export alongside `ProviderProfile` and
+`register_provider`: `get_provider_profile(name)` returning `REGISTRY.get(name)`, plus the
+`needs_stub_registry` marker the sibling already uses. Comment both: they mirror
+`providers/__init__.py:192` and `:55` so the same assertion passes with and without Hermes installed.
+
+`profile.py` keeps that name (it is what the sibling ships and what Hermes' loader expects to find
+through the package). Note in `__init__.py` why the import order is `try: from .profile import …`
+FIRST: under Hermes the plugin dir is a package, so the relative import is the only correct one —
+the absolute `from profile import …` fallback is for flat test imports only, and `profile` is a real
+stdlib module in this interpreter (`lib/python3.14/profile.py`), so if it ever won the race the
+failure would be a confusing `AttributeError` on a profiler module rather than a clean ImportError.
 
 # And LlamaSwapProfile declares `api_mode: str = "chat_completions"` explicitly, with a one-line
 # comment that it restates the built-in rather than overriding it: the stub's ProviderProfile is a
