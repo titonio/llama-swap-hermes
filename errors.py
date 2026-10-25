@@ -11,10 +11,12 @@ shadowed. Rules here are claimed only where measurement showed core wrong.
 
 Measured, not assumed: every case in ``tests/fixtures/errors.json`` was fed to
 the real ``classify_api_error`` (see ``tests/test_errors.py``, which records both
-verdicts and re-checks core's wherever Hermes is importable). Three of the five
-captured bodies — the two engine request-validation 400s and the chat-template
-400 — already classify as ``format_error`` with the right hints, so this module
-declines them and leaves them to core. Two rules are earned:
+verdicts and re-checks core's wherever Hermes is importable). Two of the five
+captured bodies — ``engine_empty_messages`` and ``engine_chat_template`` — already
+classify as ``format_error`` with the right hints, so this module declines them and
+leaves them to core. ``engine_negative_max_tokens`` is misread by core but is
+unreachable from anything Hermes sends, so it is declined too (see below). Two
+rules are earned:
 
 * **Context overflow the built-in patterns miss.** The engine rejects an
   over-long prompt with its own sentence (corpus case ``engine_input_overflow``,
@@ -40,7 +42,12 @@ declines them and leaves them to core. Two rules are earned:
   ``_V_MODEL_NOT_FOUND`` (``model_not_found`` + ``_ABORT_FALLBACK``), which is
   what it would have said had it recognised the body. The ``src`` marker is what
   keeps this narrow: it is llama-swap's own envelope, so a generic 404 from an
-  engine or a proxy keeps core's classification.
+  engine or a proxy keeps core's classification. Requiring the 404 too costs nothing
+  (llama-swap derives ``not_found`` from the status, never the reverse) and makes
+  the rule correct for llama-swap's whole dispatch family — "no model id could be
+  identified", "no peer found for requested model", "no local server found for
+  requested model", "no router for requested model" — not just the one captured
+  sentence.
 
 Deliberately NOT implemented:
 
@@ -73,8 +80,14 @@ _OVERFLOW_MARKERS: tuple[str, ...] = ("prompt does not fit",)
 
 
 # llama-swap stamps `src` on envelopes it produced itself, as opposed to bodies
-# forwarded from the engine. Only its own "no router for requested model" 404 is
-# claimed (corpus case `swap_no_router`); see the module docstring.
+# forwarded from the engine. Only its own dispatch 404s are claimed; see the module
+# docstring. The status is part of the rule rather than decoration: llama-swap
+# derives the `not_found` code from the 404 status alone (swaputil/httperror.go
+# `errorTypeForStatus` is the code's only producer), and its whole 404 family is
+# model dispatch — "no model id could be identified", "no peer found for requested
+# model", "no local server found for requested model", "no router for requested
+# model" (swaputil/http.go). So the rule is right for the family, not just for the
+# one captured string, and any other status keeps core's classification.
 _SWAP_ENVELOPE = "llama-swap"
 _SWAP_NOT_FOUND = "not_found"
 
@@ -94,14 +107,14 @@ def classify_llama_swap_error(
     Returns ``{"reason": "context_overflow", "should_compress": True}`` for a 400
     whose lowercased ``message`` carries the engine's overflow wording, and
     ``{"reason": "model_not_found", "retryable": False, "should_fallback": True}``
-    for a llama-swap envelope (``body["src"] == "llama-swap"``) carrying ``code ==
-    "not_found"``. Everything else returns ``None`` — core decides. Only
+    for a 404 on a llama-swap envelope (``body["src"] == "llama-swap"``) carrying
+    ``code == "not_found"``. Everything else returns ``None`` — core decides. Only
     ``status_code``, ``message``, ``body`` and ``error_code`` drive the decision;
     the remaining named parameters exist for Hermes' call convention.
     """
     if status_code == 400 and any(m in (message or "").lower() for m in _OVERFLOW_MARKERS):
         return {"reason": "context_overflow", "should_compress": True}
-    if not isinstance(body, dict) or body.get("src") != _SWAP_ENVELOPE:
+    if status_code != 404 or not isinstance(body, dict) or body.get("src") != _SWAP_ENVELOPE:
         return None
     if (error_code or "").lower() != _SWAP_NOT_FOUND:
         return None

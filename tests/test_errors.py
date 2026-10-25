@@ -33,8 +33,10 @@ EXPECTED = {
     # _INVALID_MESSAGE_BODY_PATTERNS — the "no user query found" signal is already
     # Hermes' own poisoned-transcript verdict. Nothing to correct.
     "engine_chat_template": {"hermes": "format_error", "plugin": None},
-    # core: format_error, same request-validation path. Correct: compressing
-    # cannot fix an empty messages array.
+    # core: format_error, but not via a pattern — "'messages' must be a non-empty
+    # array" matches neither _400_VALIDATION_PATTERNS nor
+    # _INVALID_MESSAGE_BODY_PATTERNS, so it falls through to the generic 400 default.
+    # Right verdict: compressing cannot fix an empty messages array.
     "engine_empty_messages": {"hermes": "format_error", "plugin": None},
     # core is WRONG here: "'max_tokens' must be >= 1, got -5" reaches
     # context_overflow through the bare "max_tokens" entry in
@@ -89,6 +91,26 @@ def test_every_corpus_case_has_a_recorded_expectation():
     assert sorted(EXPECTED) == sorted(CORPUS)
 
 
+def test_overflow_rule_does_not_widen_to_a_generic_context_wording():
+    """The marker's narrowness is the rule's whole safety property.
+
+    A 400 that merely mentions context (a WAF page, an unrelated template error) must
+    not be sent into compaction, which deletes history without fixing such a request.
+    No corpus case covers this — the three declined 400s carry no "context" and
+    `swap_no_router` is a 404 — so the guard is stated directly: widening
+    `_OVERFLOW_MARKERS` to a word like "context" must turn this red.
+    """
+    assert classify_llama_swap_error(status_code=400, message="the context is too big", body={}) is None
+
+
+def test_not_found_envelope_is_claimed_only_on_a_404():
+    """llama-swap derives code `not_found` from the 404 status alone, so requiring
+    the status costs nothing and keeps any other status's envelope with core."""
+    body = {"src": "llama-swap",
+            "error": {"message": "no router for requested model", "code": "not_found"}}
+    assert classify_llama_swap_error(status_code=500, error_code="not_found", body=body) is None
+
+
 class _ApiStatusError(Exception):
     """What ``openai.APIStatusError`` looks like to Hermes: a status, a body, and
     a str() that already embeds the body (which is what ``_build_error_msg`` reads)."""
@@ -99,18 +121,30 @@ class _ApiStatusError(Exception):
 
 
 @pytest.mark.parametrize("case", sorted(CORPUS))
-def test_hermes_still_answers_the_recorded_way(case):
+def test_hermes_still_answers_the_recorded_way(case, monkeypatch):
     """Re-measure ``EXPECTED[...]["hermes"]`` wherever Hermes is importable.
 
     The plugin suite must run offline, so the recorded verdicts are the contract
     here; this test keeps them honest in a Hermes checkout instead of letting
     them silently rot.
     """
-    pytest.importorskip("agent.error_classifier")
+    ec = pytest.importorskip("agent.error_classifier")
+    # importorskip guards the module import only; classify_api_error imports
+    # hermes_cli.anon_auth at call time, so a partial checkout must skip, not error.
+    pytest.importorskip("hermes_cli.anon_auth")
     from agent.error_classifier import classify_api_error
+
+    # Measure the built-in pipeline alone: once Task 5 wires the profile hook, an
+    # unguarded call re-reads *this plugin's own* verdict and reports it as core's,
+    # turning this test red for the wrong reason. _STAGES holds the stages by value,
+    # so rebinding the module attribute is what takes effect (patching
+    # _profile_verdict itself would not).
+    assert ec._profile_verdict in ec._STAGES, "core restructured its stages; re-check this guard"
+    monkeypatch.setattr(ec, "_STAGES",
+                        tuple(s for s in ec._STAGES if s is not ec._profile_verdict))
 
     classified = classify_api_error(
         _ApiStatusError(CORPUS[case]["status"], CORPUS[case]["body"]),
-        provider="llama-swap", model="strixite", base_url="http://192.168.31.7:8080/v1",
+        provider="llama-swap", model="strixite", base_url="http://h.invalid:8080/v1",
     )
     assert classified.reason.value == EXPECTED[case]["hermes"]
