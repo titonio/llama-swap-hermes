@@ -645,13 +645,23 @@ def test_model_publishing_nothing_has_no_declared_vocabulary(swap):
 def test_aux_prefers_an_already_loaded_model(swap):
     assert swap.resolve_aux_model() == ready_ids()[0]   # the fixture's one ready model
 
-def test_vision_default_comes_from_the_catalog(swap):
-    assert swap.default_vision_model() == "halogen"
+def test_vision_default_comes_from_the_catalog(warm_swap):
+    # NOT "halogen": the loaded id is runtime state (it has been two different models during
+    # this plan), and the fixtures happen to make the one loaded model the vision-capable one.
+    assert warm_swap.default_vision_model() == ready_ids()[0]
 
-def test_catalog_with_nothing_loaded_answers_no_aux(swap):
-    stub_models(swap, {"gufo": _info("gufo")})      # unloaded, no capabilities: nothing to pick
-    assert swap.resolve_aux_model() == ""
-    assert swap.default_vision_model() is None
+def test_an_unloaded_vision_model_is_still_the_vision_answer(warm_swap):
+    # The asymmetry is deliberate (design doc "auxiliary defaults"): declining for aux is free,
+    # declining for vision sends images to the main chat model (agent/auxiliary_client.py:5613),
+    # which is usually text-only here. So aux requires `loaded`; vision prefers it.
+    stub_models(warm_swap, {"eyes": _info("eyes", vision=True)})   # reports image input, unloaded
+    assert warm_swap.resolve_aux_model() == ""
+    assert warm_swap.default_vision_model() == "eyes"
+
+def test_catalog_with_nothing_loaded_answers_no_aux(warm_swap):
+    stub_models(warm_swap, {"gufo": _info("gufo")})      # unloaded, no capabilities: nothing to pick
+    assert warm_swap.resolve_aux_model() == ""
+    assert warm_swap.default_vision_model() is None
 
 # NOTE for the implementer: do not assert this by re-stubbing client.get_json — the swap
 # fixture has already filled the cache, so the warm catalog would still answer. Replace the
@@ -670,7 +680,7 @@ Expected: FAIL with `AttributeError` on each new hook.
 
 - [ ] **Step 3: Implement the hooks**
 
-`get_max_tokens(model)` looks the id up through `catalog_for` (which never does HTTP from here — the shard is already warm by the time Hermes asks, and if it is not, `None` is the honest answer) and returns `output_cap(window, self.default_max_tokens, self.min_output_tokens)`, those two fields read from `LLAMA_SWAP_DEFAULT_MAX_TOKENS` / `LLAMA_SWAP_MIN_OUTPUT_TOKENS` in `build_profile`. `resolve_aux_model` must cache its answer for the TTL — `providers/base.py:176` states the contract outright ("cheap to call (implementations must cache — this runs on client-resolution paths), never raises, and returns `\"\"` when it has no answer"). `default_vision_model` carries no such requirement in its docstring (`:250-258`), but it is resolved on the same paths, so cache it the same way; say that in the comment rather than claiming base mandates it. Return `""` / `None` when the catalog says nothing.
+`get_max_tokens(model)` looks the id up through `catalog_for` (which never does HTTP from here — the shard is already warm by the time Hermes asks, and if it is not, `None` is the honest answer) and returns `output_cap(window, self.default_max_tokens, self.min_output_tokens)`, those two fields read from `LLAMA_SWAP_DEFAULT_MAX_TOKENS` / `LLAMA_SWAP_MIN_OUTPUT_TOKENS` in `build_profile`. `resolve_aux_model` must cache its answer for the TTL — `providers/base.py:176` states the contract outright ("cheap to call (implementations must cache — this runs on client-resolution paths), never raises, and returns `\"\"` when it has no answer"). `default_vision_model` carries no such requirement in its docstring (`:250-258`), but it is resolved on the same paths, so cache it the same way; say that in the comment rather than claiming base mandates it. Return `""` / `None` when the catalog says nothing — but the two hooks do not decline on the same conditions: `resolve_aux_model` picks only among models llama-swap reports as **loaded** (a titling call must not cold-start an engine, and `""` is free), while `default_vision_model` **prefers** a loaded image-capable model and falls back to any reported one, because a `None` answer sends image input to the main chat model.
 
 Which of these hooks actually reach the wire is uneven, and it was measured rather than assumed: `get_max_tokens` is called on **every** request (`agent/transports/chat_completions.py:559` → `_apply_max_tokens`, and the agent always supplies `max_tokens_param_fn` at `agent/chat_completion_helpers.py:1502`), as are `default_reasoning_config` (`agent/reasoning_params.py:65`) and `default_vision_model` (`agent/auxiliary_client.py:858`); `resolve_aux_model` runs only on `prefer_fast` paths (`agent/auxiliary_client.py:796`). `supported_reasoning_efforts` is consulted **only** by the Responses transport (`agent/transports/codex.py:460,463`) — on this chat-completions wire it is a declaration whose clamp lands in Task 7's `build_api_kwargs_extras`, so nothing here may describe it as protecting the llama-swap request path today.
 

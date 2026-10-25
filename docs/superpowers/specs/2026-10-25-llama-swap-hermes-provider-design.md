@@ -198,7 +198,9 @@ llama-swap-hermes/
 ├── client.py            # HTTP GET helper (stdlib urllib), base URL + optional bearer
 ├── catalog.py           # /v1/models + /running → dict[model_id, ModelInfo], TTL cache
 ├── errors.py            # classify_api_error: llama-swap/llama.cpp specific branches
-├── conftest.py, tests/  # pytest; stubs providers.base when Hermes is absent
+├── tests/  # pytest; stubs providers.base when Hermes is absent, and puts the plugin root on
+            # sys.path itself (a root conftest.py would make pytest import the plugin package, which
+            # imports ``providers`` before the stub exists)
 └── scripts/smoke.py     # live check against a real llama-swap
 ```
 
