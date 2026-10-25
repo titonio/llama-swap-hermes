@@ -18,7 +18,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-import client
+# The plugin dir is not on sys.path under Hermes' loader, so sibling modules are
+# reached relatively there and absolutely in a flat checkout (tests, scripts).
+try:
+    from . import client
+except ImportError:
+    import client
 
 # Fallback only. The source of truth is Hermes' ``agent/reasoning_effort.py``
 # ``EFFORT_LADDER``, imported inside :func:`supported_efforts` so this module

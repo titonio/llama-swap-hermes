@@ -19,10 +19,8 @@ import json
 
 import pytest
 
+from conftest import CORPUS, _kwargs
 from errors import classify_llama_swap_error
-from test_fixtures import FIX
-
-CORPUS = json.loads((FIX / "errors.json").read_text())
 
 # "hermes" = measured verdict of core's classify_api_error (provider="llama-swap",
 # model="strixite", context_length left at the signature's default 200000; none of
@@ -65,20 +63,6 @@ EXPECTED = {
         "plugin": {"reason": "model_not_found", "retryable": False, "should_fallback": True},
     },
 }
-
-
-def _kwargs(case):
-    """Mirror the kwargs Hermes' ``_profile_verdict`` passes to the hook."""
-    body = case["body"]
-    err = body.get("error") or {}
-    return {
-        "error": None,                   # the exception object; our rules read the body
-        "status_code": case["status"],
-        "error_code": err.get("code") or err.get("type") or "",
-        "message": str(err.get("message") or "").lower(),   # _Ctx.msg is lowercased
-        "body": body,
-        "model": "strixite",
-    }
 
 
 @pytest.mark.parametrize("case", sorted(CORPUS))
