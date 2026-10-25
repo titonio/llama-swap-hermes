@@ -477,8 +477,21 @@ def test_ttl_expiry_triggers_a_second_fetch(swap, calls, clock):
     swap.fetch_models()
     assert len(calls) > n
 
-def test_registers_a_single_profile_at_import():
-    assert providers.REGISTRY["llama-swap"] is providers.REGISTRY["swap"]
+def test_registration_is_visible_through_the_public_api():
+    # NOT providers.REGISTRY — that name exists only in the test stub; the real module keeps
+    # _REGISTRY private (providers/__init__.py:55) and exposes get_provider_profile (:192).
+    from providers import get_provider_profile
+    assert get_provider_profile("llama-swap") is get_provider_profile("swap") is p
+
+# The stub in tests/conftest.py must therefore grow a third export alongside ProviderProfile and
+# register_provider: `get_provider_profile(name)` returning REGISTRY.get(name). Add it in this task,
+# with a comment saying it mirrors providers/__init__.py:192 so the same assertion passes with and
+# without Hermes installed.
+
+# And LlamaSwapProfile declares `api_mode: str = "chat_completions"` explicitly, with a one-line
+# comment that it restates the built-in rather than overriding it: the stub's ProviderProfile is a
+# plain kwargs-copying class with no dataclass defaults (providers/base.py:53-56 holds the real ones),
+# so a test that read an inherited default would pass under Hermes and AttributeError under the stub.
 
 def test_error_hook_delegates_and_never_raises(swap, monkeypatch):
     from errors import classify_llama_swap_error
