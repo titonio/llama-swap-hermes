@@ -48,9 +48,11 @@ llama-swap-hermes/
 ├── catalog.py               # /v1/models + /running -> {id: ModelInfo}; Hermes-shaped facts
 ├── errors.py                # classify_llama_swap_error(...) -> dict | None
 ├── profile.py               # LlamaSwapProfile hooks + build_profile(env)
-├── conftest.py              # empty: puts repo root on sys.path
 ├── tests/
-│   ├── conftest.py          # providers / providers.base stub when Hermes is absent
+│   ├── conftest.py          # providers / providers.base stub when Hermes is absent, plus the
+│   │                        # sys.path bootstrap. NO root conftest.py: pytest imports it as part of
+│   │                        # the plugin package, which runs __init__.py (imports ``providers``)
+│   │                        # before that stub exists, so collection dies in any legal-named clone.
 │   ├── fixtures/            # payloads captured from the live server (Task 1)
 │   └── test_client.py test_catalog.py test_errors.py test_profile.py test_wire.py
 ├── scripts/smoke.py         # live verification against a real llama-swap
@@ -670,6 +672,8 @@ Expected: FAIL with `AttributeError` on each new hook.
 
 `get_max_tokens(model)` looks the id up through `catalog_for` (which never does HTTP from here — the shard is already warm by the time Hermes asks, and if it is not, `None` is the honest answer) and returns `output_cap(window, self.default_max_tokens, self.min_output_tokens)`, those two fields read from `LLAMA_SWAP_DEFAULT_MAX_TOKENS` / `LLAMA_SWAP_MIN_OUTPUT_TOKENS` in `build_profile`. `resolve_aux_model` must cache its answer for the TTL — `providers/base.py:176` states the contract outright ("cheap to call (implementations must cache — this runs on client-resolution paths), never raises, and returns `\"\"` when it has no answer"). `default_vision_model` carries no such requirement in its docstring (`:250-258`), but it is resolved on the same paths, so cache it the same way; say that in the comment rather than claiming base mandates it. Return `""` / `None` when the catalog says nothing.
 
+Which of these hooks actually reach the wire is uneven, and it was measured rather than assumed: `get_max_tokens` is called on **every** request (`agent/transports/chat_completions.py:559` → `_apply_max_tokens`, and the agent always supplies `max_tokens_param_fn` at `agent/chat_completion_helpers.py:1502`), as are `default_reasoning_config` (`agent/reasoning_params.py:65`) and `default_vision_model` (`agent/auxiliary_client.py:858`); `resolve_aux_model` runs only on `prefer_fast` paths (`agent/auxiliary_client.py:796`). `supported_reasoning_efforts` is consulted **only** by the Responses transport (`agent/transports/codex.py:460,463`) — on this chat-completions wire it is a declaration whose clamp lands in Task 7's `build_api_kwargs_extras`, so nothing here may describe it as protecting the llama-swap request path today.
+
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `python3 -m pytest tests -v`
@@ -861,7 +865,7 @@ Expected: every check green, exit 0. Any failure is a real bug in Tasks 2-8 — 
 ```bash
 mkdir -p ~/.hermes/plugins/model-providers/llama-swap
 tar cf - --exclude=./tests --exclude=./scripts --exclude=./docs --exclude=./.git \
-    --exclude=./conftest.py --exclude='__pycache__' . \
+    --exclude='__pycache__' . \
   | (cd ~/.hermes/plugins/model-providers/llama-swap && tar xf -)
 hermes doctor
 hermes -z "reply with the single word ok" --provider llama-swap -m strixite
