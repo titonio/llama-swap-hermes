@@ -33,7 +33,8 @@ These are the inputs the spec implies that no single task's happy-path test cove
 - **A 200 whose body is not the shape we expect** (`[...]` instead of `{"data": [...]}`, entries that are not dicts, missing `data`, HTML from a proxy) — discovery returns `None` so Hermes falls back to `fallback_models`, and never raises inside the picker. → Task 3 `test_parse_models_tolerates_junk_payloads`.
 - **A model reporting nothing at all** (live example: `gufo` — no `capabilities`, no `context_length`) — no `False`/`0` is ever declared on its behalf; `model_capabilities` omits the absent fields and `get_max_tokens` returns `None`. → Task 3 `test_capabilities_omit_unreported_fields`, Task 6 `test_unknown_window_declares_no_cap`.
 - **A reasoning vocabulary containing levels Hermes does not know** (a future `ultra`/`turbo`, or a non-ladder string) — dropped, never forwarded verbatim; a list that filters to empty is *unknown* (`None`), not *disabled* (`()`), because `()` tells the transport to omit reasoning fields entirely. → Task 6 `test_unknown_effort_levels_are_dropped_not_forwarded`.
-- **`LLAMA_SWAP_BASE_URL` pointed at the wrong shape** — no `/v1` suffix, a trailing slash, an `https://` host that answers HTML, or a plain non-llama-swap OpenAI endpoint — must produce a clean "not enabled / no models" outcome, not a crash, and inference must still be attempted at the URL the user configured. → Task 2 `test_root_url_derives_server_root_from_base`, Task 9 `README.md` "Troubleshooting".
+- **`LLAMA_SWAP_BASE_URL` pointed at the wrong shape** — no `/v1` suffix, a trailing slash, an `https://` host that answers HTML, or a plain non-llama-swap OpenAI endpoint — must produce a clean "not enabled / no models" outcome, not a crash, and inference must still be attempted at the URL the user configured. → Task 2 `test_root_url_derives_server_root_from_base` and `test_get_json_returns_none_on_unreachable_or_malformed_base`, Task 9 `README.md` "Troubleshooting".
+- **A redirect in the path to the server** — must not be followed, and must not replay the credential to the redirect target. → Task 2 `test_get_json_refuses_a_redirect_without_replaying_the_credential`. Consequence to document in Task 9: a deployment behind a proxy that issues a same-origin 3xx will read as "no models", by design.
 
 ---
 
@@ -170,13 +171,24 @@ def test_get_json_returns_parsed_body_on_200(...)      # stub opener → {"data"
 def test_get_json_returns_none_on_404(...)             # urllib.error.HTTPError → None, no raise
 def test_get_json_returns_none_on_non_json_body(...)   # an HTML proxy page → None
 def test_get_json_sends_bearer_only_when_key_given(...)# captured Request has Authorization iff api_key
+def test_get_json_refuses_a_redirect_without_replaying_the_credential():
+    # a real 302 from a loopback http.server: None, the target never fetched, no second
+    # Authorization header. This is the credential-leak path; it is tested, not reasoned about.
+def test_get_json_returns_none_on_unreachable_or_malformed_base():
+    # a closed loopback port, "not a url", "http://h:99999/v1", "h:8080/v1", "", "ftp://h/v1"
+    # — every one returns None. The malformed ones are the regression guard: urllib raises
+    # ValueError for some of them at Request-construction time, outside the try.
+def test_env_readers_fall_back_on_junk():
+    assert env_int({"LLAMA_SWAP_CATALOG_TTL_S": "soon"}, "LLAMA_SWAP_CATALOG_TTL_S", 60) == 60
+    assert env_int({}, "LLAMA_SWAP_CATALOG_TTL_S", 60) == 60          # absent → default, not 0
+    assert env_str({"LLAMA_SWAP_BASE_URL": "  http://h:1/v1/  "}, "LLAMA_SWAP_BASE_URL", "") == "http://h:1/v1/"
 def test_root_url_derives_server_root_from_base():
     assert root_url("http://192.168.31.7:8080/v1") == "http://192.168.31.7:8080"
     assert root_url("http://192.168.31.7:8080/") == "http://192.168.31.7:8080"
     assert root_url("http://host:9000/api") == "http://host:9000/api"
-def test_malformed_env_int_falls_back_to_default():
-    assert env_int({"LLAMA_SWAP_CATALOG_TTL_S": "soon"}, "LLAMA_SWAP_CATALOG_TTL_S", 60) == 60
 ```
+
+The two `...`-argument tests are written out in full by the implementer (stub the opener the way the first four do); the point of naming them here is that the **redirect and malformed-URL paths are covered by committed tests**, not by a throwaway loopback script — they are the paths the spec's anti-goals turn on, and a later refactor of the `try` boundary is exactly what would break them silently.
 
 - [ ] **Step 2: Run them to verify they fail**
 
@@ -190,7 +202,7 @@ Expected: collection error, `ModuleNotFoundError: No module named 'client'`.
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `python3 -m pytest tests/test_client.py -v`
-Expected: 6 passed.
+Expected: 9 passed.
 
 - [ ] **Step 5: Commit**
 
