@@ -136,12 +136,15 @@ def test_hermes_still_answers_the_recorded_way(case, monkeypatch):
 
     # Measure the built-in pipeline alone: once Task 5 wires the profile hook, an
     # unguarded call re-reads *this plugin's own* verdict and reports it as core's,
-    # turning this test red for the wrong reason. _STAGES holds the stages by value,
-    # so rebinding the module attribute is what takes effect (patching
-    # _profile_verdict itself would not).
-    assert ec._profile_verdict in ec._STAGES, "core restructured its stages; re-check this guard"
-    monkeypatch.setattr(ec, "_STAGES",
-                        tuple(s for s in ec._STAGES if s is not ec._profile_verdict))
+    # turning this test red for the wrong reason. Patch the public lookup the profile
+    # stage performs at call time (``from providers import get_provider_profile`` at
+    # agent/error_classifier.py:731) rather than rebinding the private _STAGES tuple:
+    # it neutralises exactly that one stage, and it still works if core stops reading
+    # _STAGES at call time. Returning None is the stage's own "no profile" path.
+    import providers as providers_module
+    assert callable(getattr(providers_module, "get_provider_profile", None)), (
+        "providers.get_provider_profile is the seam this guard relies on")
+    monkeypatch.setattr(providers_module, "get_provider_profile", lambda slug: None)
 
     classified = classify_api_error(
         _ApiStatusError(CORPUS[case]["status"], CORPUS[case]["body"]),
