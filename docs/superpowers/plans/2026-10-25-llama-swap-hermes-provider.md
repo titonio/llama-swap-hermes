@@ -433,6 +433,8 @@ git add errors.py tests/test_errors.py tests/fixtures/errors.json && git commit 
 
 Three fixtures, added to `tests/conftest.py` in this task: `swap` (a profile built by `build_profile({})` whose catalog comes from the captured fixtures), `calls` (a list of every URL the stubbed `client.get_json` served), and `clock` (monkeypatches `time.monotonic`, which is what the cache stamps `at` with, so TTL expiry is testable without sleeping). Two helpers, also in `tests/conftest.py`: `stub_models(swap, infos)` repoints the stub at an arbitrary `{id: ModelInfo}` catalog (use it wherever the captured server publishes nothing relevant to a test) and `_info(id, **facts)` builds a `ModelInfo` with the unset facts left `None`.
 
+One trap in that signature: `_info` already passes all five core fields to `ModelInfo`, so `_info("x", context_length=…)` hands the keyword twice and raises `TypeError`. Task 6 added `_stated(info, **facts)` (a `dataclasses.replace`) for exactly this; it lives in `tests/test_profile.py` for now, and any later task that needs it moves it into `tests/conftest.py` beside `_info` rather than redefining it.
+
 ```python
 def test_identity_fields():
     p = build_profile({})
@@ -617,7 +619,7 @@ def test_unknown_window_declares_no_cap():
 
 def test_get_max_tokens_follows_the_models_window(swap):
     assert swap.get_max_tokens("strixite") == 8192                       # 262144 // 4 > default
-    stub_models(swap, {"tiny": _info("tiny", context_length=8192)})
+    stub_models(swap, {"tiny": _stated(_info("tiny"), context_length=8192)})
     assert swap.get_max_tokens("tiny") == 2048                           # window // 4 wins
     assert swap.get_max_tokens("gufo") is None                           # never reported
 
@@ -654,7 +656,7 @@ def test_an_unloaded_vision_model_is_still_the_vision_answer(warm_swap):
     # The asymmetry is deliberate (design doc "auxiliary defaults"): declining for aux is free,
     # declining for vision sends images to the main chat model (agent/auxiliary_client.py:5613),
     # which is usually text-only here. So aux requires `loaded`; vision prefers it.
-    stub_models(warm_swap, {"eyes": _info("eyes", vision=True)})   # reports image input, unloaded
+    stub_models(warm_swap, {"eyes": _stated(_info("eyes"), vision=True)})   # reports image input, unloaded
     assert warm_swap.resolve_aux_model() == ""
     assert warm_swap.default_vision_model() == "eyes"
 
@@ -723,9 +725,9 @@ EFFORTS = {"low_only": ("none", "minimal", "low"), "no_reasoning": ()}
 
 @pytest.fixture(params=["strixite"])
 def swap_wire(swap):
-    stub_models(swap, {"strixite": _info("strixite", efforts=("none", "minimal", "low", "medium")),
-                       "low_only": _info("low_only", efforts=EFFORTS["low_only"]),
-                       "no_reasoning": _info("no_reasoning", efforts=None, reasoning_enabled=False)})
+    stub_models(swap, {"strixite": _stated(_info("strixite"), efforts=("none", "minimal", "low", "medium")),
+                       "low_only": _stated(_info("low_only"), efforts=EFFORTS["low_only"]),
+                       "no_reasoning": _stated(_info("no_reasoning"), efforts=None, reasoning_enabled=False)})
     return swap
 
 def test_reasoning_effort_travels_top_level(swap_wire):
@@ -743,7 +745,7 @@ def test_a_vocabulary_the_model_never_published_omits_the_field(swap_wire):
     assert top == {}
 
 def test_unknown_effort_levels_are_dropped_before_the_wire(swap_wire):
-    stub_models(swap_wire, {"future": _info("future", efforts=("low", "turbo", "ultra"))})
+    stub_models(swap_wire, {"future": _stated(_info("future"), efforts=("low", "turbo", "ultra"))})
     assert swap_wire.supported_reasoning_efforts("future") == ("low", "ultra")
 
 def test_hooks_ignore_the_extra_kwargs_hermes_passes(swap_wire):
