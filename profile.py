@@ -36,10 +36,11 @@ DEFAULT_PROBE_TIMEOUT_S = 3
 DEFAULT_MAX_TOKENS = 8192
 DEFAULT_MIN_OUTPUT_TOKENS = 1024
 
-# {normalized base URL: {"at": monotonic, "infos": {id: ModelInfo}, "failed": bool}}
-# ``failed`` records that the probe at ``at`` could not read the catalog, which is
-# what keeps a dead server from being re-probed on every hook call: the entry is
-# present, so the read hooks answer from its (empty) ``infos``.
+# {normalized base URL: {"at": monotonic, "infos": {id: ModelInfo}}}
+# A failed probe is stored the same way — empty ``infos``, fresh ``at`` — which is what
+# keeps a dead server from being re-probed on every hook call: the entry is present, so
+# the read hooks answer from its empty ``infos``. The TTL, not a separate flag, is what
+# retires it, so a server that recovers is retried at the next warming read.
 #
 # One profile instance per process (Hermes registers one profile per name, and this
 # plugin ships one base URL), so a plain module dict is enough — no per-home
@@ -55,9 +56,9 @@ def _cache_entry(url: str) -> dict[str, Any] | None:
         return _CATALOG_CACHE.get(url)
 
 
-def _store(url: str, infos: dict[str, ModelInfo], *, failed: bool) -> None:
+def _store(url: str, infos: dict[str, ModelInfo]) -> None:
     with _CACHE_LOCK:
-        _CATALOG_CACHE[url] = {"at": time.monotonic(), "infos": infos, "failed": failed}
+        _CATALOG_CACHE[url] = {"at": time.monotonic(), "infos": infos}
 
 
 def _shard_url(profile: LlamaSwapProfile) -> str:
@@ -69,7 +70,9 @@ def _shard_for(profile: LlamaSwapProfile) -> dict[str, ModelInfo] | None:
     """The cached catalog for that URL, or ``None`` when nothing has been fetched.
 
     ``None`` and ``{}`` are different answers: the empty dict is a server that was
-    reached and had nothing (or failed), and must not read as "never probed".
+    reached and had nothing (or failed), and must not read as "never probed". Strictly
+    cache-only: :meth:`LlamaSwapProfile.warm` is the only place the TTL retires an entry,
+    so a stale shard here simply ages out at the next warming read.
     """
     entry = _cache_entry(_shard_url(profile))
     return None if entry is None else entry["infos"]
@@ -170,13 +173,15 @@ class LlamaSwapProfile(ProviderProfile):
     before the dataclass base constructor sees them.
     """
 
-    # Restates the built-in (providers/base.py:140) rather than overriding it: the test
+    # Restates the built-in (providers/base.py:47) rather than overriding it: the test
     # stub's ProviderProfile is a plain kwargs-copying class with no dataclass defaults,
     # so a test that read an inherited default would pass under Hermes and AttributeError
     # under the stub. The same reason ``build_profile`` passes model_capabilities.
     api_mode: str = "chat_completions"
 
     # The shard the read hooks answer from, once fetch_models has been handed a route.
+    # Single-valued because ``get_model_context_length(self, model)`` gives Hermes no URL
+    # to key on: with a credential pool spanning two base URLs, the last picker call wins.
     _active_url: str = ""
 
     def __init__(
@@ -210,6 +215,11 @@ class LlamaSwapProfile(ProviderProfile):
         failure is cached for the TTL so a dead server costs one bounded wait instead
         of one per hook call. ``timeout`` is the caller's when it has one (setup and
         the picker can afford more than a hot-path probe); otherwise the probe budget.
+
+        One probe is TWO GETs (``/models``, then ``/running`` at the root), each bounded
+        by the full ``timeout``, so the budget bounds a probe near TWICE its width:
+        ``LLAMA_SWAP_PROBE_TIMEOUT_S=3`` means up to about 6 s, not 3 s. A failed
+        ``/models`` short-circuits before ``/running``, so a dead server pays one GET.
         """
         url = client.normalize_base_url(base_url or self.base_url)
         self._active_url = url
@@ -220,7 +230,7 @@ class LlamaSwapProfile(ProviderProfile):
         infos, error = fetch_catalog(
             url, api_key or self.api_key, timeout if timeout is not None else self.probe_timeout
         )
-        _store(url, infos, failed=error is not None)
+        _store(url, infos)
         if error is None:
             _refresh_capabilities(self, infos)
         return infos
@@ -247,16 +257,16 @@ class LlamaSwapProfile(ProviderProfile):
         """The window llama-swap reported for ``model``, or ``None``.
 
         The sanctioned warming point: Hermes calls this at agent init and on model
-        switch, so the first call for a server does ONE probe bounded by
-        ``LLAMA_SWAP_PROBE_TIMEOUT_S`` and every later call is cache-only. ``None``
-        means the server never stated a window — a model it has not loaded yet — which
-        hands Hermes its own chain (catalog, config override, then the 256 K default).
-        Inventing a window here is the failure this plugin exists to avoid.
+        switch. :meth:`warm` owns the freshness rule, so the first call for a server does
+        ONE probe bounded by ``LLAMA_SWAP_PROBE_TIMEOUT_S``, later calls are cache-only,
+        and an expired entry — including a cached failure — is probed again. At most one
+        bounded probe per TTL per server, which is also how a server that was down at
+        session start comes back. ``None`` means the server never stated a window — a
+        model it has not loaded yet — which hands Hermes its own chain (catalog, config
+        override, then the 256 K default). Inventing a window here is the failure this
+        plugin exists to avoid.
         """
-        shard = _shard_for(self)
-        if shard is None:
-            shard = self.warm()
-        info = shard.get(model)
+        info = self.warm(base_url=_shard_url(self)).get(model)
         return None if info is None else info.context_length
 
     def get_max_tokens(self, model: str | None) -> int | None:

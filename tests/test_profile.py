@@ -62,9 +62,16 @@ def test_base_url_env_override():
 
 
 def test_env_knob_reaches_the_profile():
-    p = build_profile({"LLAMA_SWAP_CATALOG_TTL_S": "soon", "LLAMA_SWAP_DEFAULT_MAX_TOKENS": "4096"})
+    p = build_profile({
+        "LLAMA_SWAP_CATALOG_TTL_S": "soon",
+        "LLAMA_SWAP_DEFAULT_MAX_TOKENS": "4096",
+        "LLAMA_SWAP_PROBE_TIMEOUT_S": "7",
+        "LLAMA_SWAP_MIN_OUTPUT_TOKENS": "512",
+    })
     assert p.catalog_ttl == 60            # junk TTL → default, never 0 (which would mean no caching)
     assert p.default_max_tokens == 4096
+    assert p.probe_timeout == 7           # the probe budget, proven at the socket below
+    assert p.min_output_tokens == 512
 
 
 def test_fetch_models_returns_server_order_and_warms(swap, calls):
@@ -95,9 +102,49 @@ def test_context_length_probe_happens_once_at_first_use(swap, calls):
 
 
 def test_unreachable_server_probes_once_and_degrades(swap, monkeypatch):
-    monkeypatch.setattr(client, "get_json", lambda *a, **k: None)
-    assert swap.get_model_context_length("strixite") is None    # probe 1: fails
-    assert swap.get_model_context_length("strixite") is None    # cached failure: no probe 2
+    probes: list[int] = []
+
+    def dead(*args, **kwargs):
+        probes.append(1)
+        return None
+
+    monkeypatch.setattr(client, "get_json", dead)
+    assert swap.get_model_context_length(ready_ids()[0]) is None  # probe 1: fails
+    assert swap.get_model_context_length(ready_ids()[0]) is None  # cached failure: no probe 2
+    # The count is the whole point: an uncached failure makes EVERY hook call in a
+    # session wait out the probe budget on a dead server. A failed /models short-circuits
+    # before /running (catalog.fetch_catalog), so one probe is one GET here.
+    assert len(probes) == 1
+
+
+def test_a_failed_probe_is_retried_after_the_ttl(swap, clock, monkeypatch):
+    # The cache is a TTL cache, not a once-per-process latch: a server that was down for
+    # five seconds at session start must be back within a TTL, not silent for the rest
+    # of the session — and the refresh must reach model_capabilities, not just the shard.
+    probes: list[int] = []
+
+    def dead(*args, **kwargs):
+        probes.append(1)
+        return None
+
+    monkeypatch.setattr(client, "get_json", dead)
+    assert swap.get_model_context_length(ready_ids()[0]) is None
+    assert len(probes) == 1
+    clock.advance(61)
+    monkeypatch.setattr(
+        client, "get_json", lambda *a, **k: {"data": [{"id": "only", "context_length": 1024}]}
+    )
+    assert swap.get_model_context_length("only") == 1024                    # recovered
+    assert swap.model_capabilities == {"only": {"context_window": 1024}}    # capabilities too
+
+
+def test_probe_timeout_reaches_the_socket(swap, calls):
+    # LLAMA_SWAP_PROBE_TIMEOUT_S is the only bound between a stalled llama-swap and a
+    # hung per-turn path (agent/model_metadata.py:2295). A non-default number, so a probe
+    # that hardcoded the default — or dropped the timeout and waited forever — fails here.
+    swap.probe_timeout = 7
+    swap.get_model_context_length(ready_ids()[0])
+    assert calls.timeouts == [7, 7]
 
 
 def test_model_that_reports_no_window_has_no_context_length(swap):
@@ -333,6 +380,7 @@ def test_package_import_registers_provider():
         # would have raised here instead of registering. The flat copies on sys.path make the
         # absolute form succeed in tests, so the proof is which copy the package ended up with.
         assert sys.modules[f"{module_name}.catalog"].client.__name__ == f"{module_name}.client"
+        assert sys.modules[f"{module_name}.profile"].client.__name__ == f"{module_name}.client"
     finally:
         for name in [n for n in sys.modules if n.startswith(module_name)]:
             sys.modules.pop(name, None)

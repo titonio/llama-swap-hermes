@@ -17,6 +17,13 @@ import types
 
 import pytest
 
+# The repo root on sys.path, so `import client` / `catalog` / `profile` work under any
+# invocation. It cannot live in a root conftest.py: when this directory's name is a legal
+# identifier (a clone into `llama_swap`), pytest imports that conftest as part of the
+# package, which runs __init__.py — and its `from providers import register_provider`
+# executes before this file has injected the stub below.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
 try:
     import providers  # noqa: F401
     import providers.base  # noqa: F401
@@ -113,7 +120,18 @@ def stub_models(swap, infos):
     A TTL refresh after this re-reads the captured fixtures, so keep it last.
     """
     url = client.normalize_base_url(swap.base_url)
-    plugin._CATALOG_CACHE[url] = {"at": time.monotonic(), "infos": dict(infos), "failed": False}
+    plugin._CATALOG_CACHE[url] = {"at": time.monotonic(), "infos": dict(infos)}
+
+
+class _Served(list):
+    """The URLs the stub served, in order, plus ``timeouts`` — the ``timeout`` each GET
+    was given. The budget is invisible everywhere else in the suite, so recording it
+    here is what lets a test pin ``LLAMA_SWAP_PROBE_TIMEOUT_S`` to the socket.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.timeouts: list[float | None] = []
 
 
 @pytest.fixture
@@ -122,9 +140,10 @@ def calls(monkeypatch):
 
     Patched on the ``client`` module because ``catalog.fetch_catalog`` reaches it as
     ``client.get_json`` — that attribute lookup is the seam that keeps the suite
-    offline; a from-import in catalog.py would be unpatchable.
+    offline; a from-import in catalog.py would be unpatchable. The returned list also
+    records ``.timeouts`` — see :class:`_Served`.
     """
-    served: list[str] = []
+    served = _Served()
     payloads = {
         "/models": json.loads((FIX / "models.json").read_text()),
         "/running": json.loads((FIX / "running.json").read_text()),
@@ -132,6 +151,7 @@ def calls(monkeypatch):
 
     def fake_get_json(base_url, path, *, api_key=None, timeout=None):
         served.append(client.normalize_base_url(base_url) + path)
+        served.timeouts.append(timeout)
         return payloads.get(path)
 
     monkeypatch.setattr(client, "get_json", fake_get_json)
