@@ -101,7 +101,7 @@ def test_context_length_probe_happens_once_at_first_use(swap, calls):
     assert len(calls) == 2
 
 
-def test_unreachable_server_probes_once_and_degrades(swap, monkeypatch):
+def test_unreachable_server_probes_once_and_degrades(swap, clock, monkeypatch):
     probes: list[int] = []
 
     def dead(*args, **kwargs):
@@ -115,6 +115,12 @@ def test_unreachable_server_probes_once_and_degrades(swap, monkeypatch):
     # session wait out the probe budget on a dead server. A failed /models short-circuits
     # before /running (catalog.fetch_catalog), so one probe is one GET here.
     assert len(probes) == 1
+    # The joint property lives here, not split across two tests: the SAME cached failure
+    # that absorbs reads inside the TTL must be retried once the TTL expires — the cache
+    # is a TTL cache, not a latch (Task 5's re-review P2).
+    clock.advance(61)
+    assert swap.get_model_context_length(ready_ids()[0]) is None  # still dead
+    assert len(probes) == 2                                       # TTL expiry re-probed
 
 
 def test_a_failed_probe_is_retried_after_the_ttl(swap, clock, monkeypatch):
@@ -200,7 +206,9 @@ def test_error_hook_delegates_and_never_raises(swap, monkeypatch):
 # The rule these pin is that a declared budget is a CAP the server can serve, never a
 # raise, and that a fact llama-swap did not state stays unstated: ``None`` means "the
 # server said nothing" (Hermes keeps its own default), ``()`` means "reasoning is off"
-# (no reasoning field may go on the wire), and the two must never collapse into one.
+# (the transport must omit the reasoning field — the clamp itself is Task 7's, since
+# ``supported_reasoning_efforts`` only reaches the Responses transport today, see
+# agent/transports/codex.py:460,463), and the two must never collapse into one.
 
 
 def test_output_cap_is_a_cap_never_a_raise():
@@ -208,6 +216,10 @@ def test_output_cap_is_a_cap_never_a_raise():
     assert output_cap(8192, default_max=8192, floor=1024) == 2048     # window // 4
     assert output_cap(2048, default_max=8192, floor=1024) == 1024     # floor
     assert output_cap(512, default_max=8192, floor=1024) == 1024      # floor, not window//4
+    # Contradictory operator config (DEFAULT_MAX_TOKENS < MIN_OUTPUT_TOKENS): the floor
+    # is nested inside the cap (spec min(default_max, max(floor, window//4))), so the
+    # declared number can never EXCEED the configured default — a cap, never a raise.
+    assert output_cap(262144, default_max=512, floor=1024) == 512
 
 
 def test_unknown_window_declares_no_cap():
@@ -230,14 +242,17 @@ def test_get_max_tokens_follows_the_models_window(warm_swap):
     assert warm_swap.get_max_tokens("gufo") is None                   # never reported
 
 
-def test_cold_shard_declares_nothing(swap):
+def test_cold_shard_declares_nothing(swap, calls):
     # Before the first probe every hot-path hook must decline without fetching: an
     # invented budget or vocabulary is the failure mode this plugin exists to avoid.
+    # ``calls`` is the direct proof — a hook warming behind the TTL branch would put a
+    # GET on every request path, and the answers alone would not show it.
     assert swap.get_max_tokens("strixite") is None
     assert swap.supported_reasoning_efforts("strixite") is None
     assert swap.resolve_aux_model() == ""
     assert swap.default_vision_model() is None
     assert swap.default_reasoning_config("strixite") is None
+    assert not calls
 
 
 def test_hot_path_hooks_never_touch_the_network(warm_swap, calls):
@@ -263,8 +278,9 @@ def test_model_publishing_nothing_has_no_declared_vocabulary(warm_swap):
 
 def test_reasoning_switched_off_declares_an_empty_vocabulary(warm_swap):
     # The other half of the tri-state: the server SAID reasoning is off, so the
-    # transport must send no reasoning field. ``None`` here would keep the default
-    # vocabulary on the wire, which is the 400 this plugin is avoiding.
+    # declaration the transport reads (codex today, Task 7's clamp on this wire) must
+    # be ``()`` — omit the field. ``None`` here would keep the default vocabulary in
+    # play, which is the 400 the clamp is there to avoid.
     stub_models(warm_swap, {"flat": _stated(_info("flat"), reasoning_enabled=False, efforts=("low",))})
     assert warm_swap.supported_reasoning_efforts("flat") == ()
     assert warm_swap.default_reasoning_config("flat") is None
@@ -306,7 +322,31 @@ def test_a_model_that_denied_vision_is_not_the_vision_default(warm_swap):
 
 
 def test_vision_default_comes_from_the_catalog(warm_swap):
-    assert warm_swap.default_vision_model() == "halogen"
+    # NOT "halogen": the loaded id is runtime state (it has been two different models
+    # during this plan), and the fixtures happen to make the one loaded model the
+    # vision-capable one.
+    assert warm_swap.default_vision_model() == ready_ids()[0]
+
+
+def test_an_unloaded_vision_model_is_still_the_vision_answer(warm_swap):
+    # The aux/vision asymmetry is deliberate (design doc "Auxiliary and vision
+    # defaults"): declining for aux is free, declining for vision sends images to the
+    # main chat model (agent/auxiliary_client.py:5613), which is usually text-only
+    # here. So aux requires `loaded`; vision prefers it and falls back to any model
+    # that reported image input — naming it costs one llama-swap auto-load.
+    stub_models(warm_swap, {"eyes": _stated(_info("eyes"), vision=True)})   # image input, unloaded
+    assert warm_swap.resolve_aux_model() == ""                     # aux: loaded-only, declines
+    assert warm_swap.default_vision_model() == "eyes"              # vision: names it anyway
+
+
+def test_a_loaded_vision_model_is_preferred_over_an_unloaded_one(warm_swap):
+    # The ladder is prefer-loaded-then-any, not any-first: a loaded pick serves the
+    # image now, an unloaded one pays a cold start for no reason.
+    stub_models(warm_swap, {
+        "early": _stated(_info("early"), vision=True),                 # reports vision, unloaded
+        "late": _stated(_info("late"), loaded=True, vision=True),  # loaded, later in server order
+    })
+    assert warm_swap.default_vision_model() == "late"
 
 
 def test_catalog_with_nothing_loaded_answers_no_aux(warm_swap):
@@ -322,7 +362,7 @@ def test_a_cold_no_answer_is_not_cached_as_an_answer(swap):
     assert swap.default_vision_model() is None
     swap.fetch_models()
     assert swap.resolve_aux_model() == ready_ids()[0]
-    assert swap.default_vision_model() == "halogen"
+    assert swap.default_vision_model() == ready_ids()[0]
 
 
 def test_aux_answer_is_cached_for_the_ttl(warm_swap, clock):

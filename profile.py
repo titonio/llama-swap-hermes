@@ -83,15 +83,18 @@ def output_cap(window: int | None, default_max: int, floor: int) -> int | None:
 
     A cap, never a raise: the number exists so Hermes does not send an output budget the
     loaded model cannot serve, so it is the smaller of the configured default and a
-    quarter of the window — the rest stays the prompt's. ``floor`` clamps from below:
-    a cap under it leaves compression no headroom, so it is the answer instead of a
-    smaller one. A ``None`` window means llama-swap never stated one (a model it has not
-    loaded), and "no claim" beats an invented one: Hermes' own reactive path — retry
-    smaller after an overflow — is left in charge.
+    quarter of the window — the rest stays the prompt's. ``floor`` lifts a quarter-window
+    that leaves compression no headroom, but only up to ``default_max``: the floor is
+    nested *inside* the cap (spec ``min(default_max, max(floor, window // 4))``), so even
+    a contradictory config (``DEFAULT_MAX_TOKENS=512``, ``MIN_OUTPUT_TOKENS=1024``)
+    cannot make the declared number exceed what the operator configured. A ``None``
+    window means llama-swap never stated one (a model it has not loaded), and "no claim"
+    beats an invented one: Hermes' own reactive path — retry smaller after an overflow —
+    is left in charge.
     """
     if window is None:
         return None
-    return max(floor, min(default_max, window // 4))
+    return min(default_max, max(floor, window // 4))
 
 
 def catalog_for(profile: LlamaSwapProfile, model: str) -> ModelInfo | None:
@@ -295,6 +298,11 @@ class LlamaSwapProfile(ProviderProfile):
         list is not an answer here: the captured catalog gives ``strixite`` six levels
         and the others seven, and forwarding a level one model 400s on is the bug.
         ``catalog.supported_efforts`` owns the filtering and the ladder import.
+
+        Honest scope: today the only callers are the Responses transport
+        (``agent/transports/codex.py:460,463``) — on this chat-completions wire nothing
+        clamps against this tuple yet; Task 7's ``build_api_kwargs_extras`` installs that
+        clamp. The declaration is the hand-off, not the enforcement.
         """
         info = catalog_for(self, model)
         return None if info is None else supported_efforts(info)
@@ -306,17 +314,29 @@ class LlamaSwapProfile(ProviderProfile):
         paths) and forbids raising; :meth:`_pick` does both. Only a LOADED model is
         offered: llama-swap starts an engine on demand, and a side task such as titling
         has no business blocking on a model load.
+
+        Declining is free here, unlike :meth:`default_vision_model`: the hook is consulted
+        only under ``prefer_fast`` (``agent/auxiliary_client.py:783-796``), and ``""``
+        falls to ``profile.default_aux_model`` — base value ``""`` = "use the main model"
+        (``providers/base.py:143-146``) — then to ``_API_KEY_PROVIDER_AUX_MODELS_FALLBACK``,
+        which has no llama-swap entry.
         """
         return self._pick(need_vision=vision)
 
     def default_vision_model(self) -> str | None:
-        """A loaded model that published vision, or ``None``.
+        """A model that published vision — loaded if one is up, else any reported one.
+
+        ``None`` only when no model in the catalog claims image input.
 
         Base (``providers/base.py:250-258``) does not mandate caching for this hook the
         way it does for ``resolve_aux_model``, but it resolves on those same paths, so it
-        shares the same memo. ``None`` means no claim: the caller keeps its own chain
-        (user chat model, then the aggregator) rather than being sent an id that never
-        claimed it could take an image.
+        shares the same memo. The loaded filter is a preference here, not a gate: ``None``
+        means ``vision_model = provider_vision_default or main_model``
+        (``agent/auxiliary_client.py:5613``) sends the image to the user's chat model,
+        which on llama-swap is usually text-only. Naming an unloaded image-capable model
+        instead costs one llama-swap auto-load — the server's normal job — so the ladder
+        is prefer-loaded, then any reported, then ``None``. Aux keeps the strict loaded
+        gate because its decline lands on "use main model" (see :meth:`resolve_aux_model`).
         """
         return self._pick(need_vision=True) or None
 
@@ -335,13 +355,18 @@ class LlamaSwapProfile(ProviderProfile):
         return None
 
     def _pick(self, *, need_vision: bool) -> str:
-        """First loaded model id, in server order, that can serve the ask; ``""`` when none.
+        """First model id, in server order, that can serve the ask; ``""`` when none.
+
+        The ladder differs by need: aux takes the first LOADED model (a decline is free
+        there); vision takes the first loaded image-capable model, else the first
+        reported-capable one, because a ``None`` vision answer sends the image to the
+        main chat model (see :meth:`default_vision_model`). An unknown vision (``None``)
+        does not qualify either way: it is the server not saying, not a yes.
 
         Memoised per profile for ``catalog_ttl`` because ``resolve_aux_model`` must cache
         (``providers/base.py:176``) and ``default_vision_model`` runs on the same paths;
         the shard URL is part of the stamp so a credential-pool route switch invalidates
-        it. An unknown vision (``None``) does not qualify: it is the server not saying,
-        not a yes. Only a real pick is memoised — a ``""`` from a cold shard would
+        it. Only a real pick is memoised — a ``""`` from a cold shard would
         otherwise survive the whole TTL after the catalog warms, and re-scanning a dict
         is cheaper than being wrong for a minute.
         """
@@ -350,14 +375,13 @@ class LlamaSwapProfile(ProviderProfile):
         cached = self._pick_memo.get(need_vision)
         if cached is not None and cached[0] == url and now - cached[1] < self.catalog_ttl:
             return cached[2]
-        picked = next(
-            (
-                info.id
-                for info in (_shard_for(self) or {}).values()
-                if info.loaded and (info.vision is True or not need_vision)
-            ),
-            "",
-        )
+        shard = _shard_for(self) or {}
+        if need_vision:
+            capable = [info for info in shard.values() if info.vision is True]
+            candidates = [info for info in capable if info.loaded] or capable
+        else:
+            candidates = [info for info in shard.values() if info.loaded]
+        picked = candidates[0].id if candidates else ""
         if picked:
             self._pick_memo[need_vision] = (url, now, picked)
         return picked
