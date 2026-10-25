@@ -329,7 +329,7 @@ class _Resp(Exception):                      # what openai.APIStatusError looks 
         super().__init__(f"Error code: {status} - {json.dumps(body)}")
         self.status_code, self.body = status, body
 
-corpus = json.load(open("tests/fixtures/errors.json"))
+corpus = json.load(open(__import__("os").environ["CORPUS"]))
 for name in sorted(corpus):
     case = corpus[name]
     if "status" not in case:
@@ -339,8 +339,10 @@ for name in sorted(corpus):
                            model="strixite", base_url="http://192.168.31.7:8080/v1")
     print(name, "->", getattr(getattr(v, "reason", None), "value", v))
 PY
-cp /tmp/corpus_probe.py /home/hermes/.hermes/hermes-agent/_corpus_probe.py \
-  && cd /home/hermes/.hermes/hermes-agent && /home/hermes/.local/bin/hermes --run-module _corpus_probe
+REPO=$(pwd)                      # capture before cd: the probe reads fixtures by absolute path
+cp /tmp/corpus_probe.py /home/hermes/.hermes/hermes-agent/_corpus_probe.py
+( cd /home/hermes/.hermes/hermes-agent && CORPUS="$REPO/tests/fixtures/errors.json" \
+    /home/hermes/.local/bin/hermes --run-module _corpus_probe )
 rm -f /home/hermes/.hermes/hermes-agent/_corpus_probe.py
 ```
 
