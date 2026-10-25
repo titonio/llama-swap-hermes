@@ -206,7 +206,7 @@ Expected: collection error, `ModuleNotFoundError: No module named 'client'`.
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `python3 -m pytest tests/test_client.py -v`
-Expected: 8 passed.
+Expected: 8 passed, in well under a second. If it takes seconds, a test is doing a real DNS lookup — fix the host name, do not accept the wait.
 
 - [ ] **Step 5: Commit**
 
