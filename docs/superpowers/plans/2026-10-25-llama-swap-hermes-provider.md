@@ -98,6 +98,8 @@ curl -sS http://192.168.31.7:8080/v1/models > tests/fixtures/models.json
 curl -sS http://192.168.31.7:8080/running  > tests/fixtures/running.json
 ```
 
+Capture what the server says **today** and commit it verbatim — never hand-edit a fixture, and never ask the operator to load a particular model so a test reads nicer. Which model happens to be loaded changes between design time and now (it was `strixite`, then `halogen`), so the tests below are written to derive that id from the fixture. If `"running"` ever comes back with two ready entries, that is a real change worth a plan edit — report it, do not work around it.
+
 Then append to `tests/fixtures/errors.json` the four bodies captured during design (they are the classifier's corpus; Task 4 asserts against them):
 
 ```json
@@ -111,17 +113,21 @@ Then append to `tests/fixtures/errors.json` the four bodies captured during desi
 
 - [ ] **Step 3: Write the failing fixture test**
 
-`tests/test_fixtures.py` — the fixtures must contain the shapes the rest of the plan asserts on, so a silent server change is caught here (`import json, pathlib`, `FIX = pathlib.Path(__file__).parent / "fixtures"` at the top of the file):
+`tests/test_fixtures.py` — the fixtures must contain the shapes the rest of the plan asserts on, so a silent server change is caught here (`import json, pathlib`, `FIX = pathlib.Path(__file__).parent / "fixtures"` at the top of the file). Note what is **not** asserted here: *which* model is loaded. That is transient runtime state (it is whichever model the last request touched, and pi itself runs against this server), so no test in this plan may name a loaded id — derive it from the fixture instead.
 
 ```python
+def ready_ids():
+    return [r["model"] for r in json.load(open(FIX / "running.json"))["running"] if r["state"] == "ready"]
+
 def test_models_fixture_covers_every_reported_shape():
     ids = {m["id"] for m in json.load(open(FIX / "models.json"))["data"]}
     assert ids == {"crucible", "gufo", "halogen", "strixite"}   # crucible: context, no caps
                                                               # gufo: neither; halogen: vision+tools
 
 def test_running_fixture_marks_exactly_one_model_ready():
-    ready = [r["model"] for r in json.load(open(FIX / "running.json"))["running"] if r["state"] == "ready"]
-    assert ready == ["strixite"]
+    ready = ready_ids()
+    assert len(ready) == 1 and ready[0] in {                     # the count is the contract,
+        m["id"] for m in json.load(open(FIX / "models.json"))["data"]}   # the id is whatever the server had loaded
 ```
 
 - [ ] **Step 4: Add the `providers` stub conftest**
@@ -428,7 +434,7 @@ def test_env_knob_reaches_the_profile():
 
 def test_fetch_models_returns_server_order_and_warms(swap, calls):
     assert swap.fetch_models() == ["crucible", "gufo", "halogen", "strixite"]
-    assert catalog_for(swap, "halogen").loaded is True
+    assert catalog_for(swap, ready_ids()[0]).loaded is True      # whichever id the fixture has ready
 
 def test_fetch_models_returns_none_when_server_unreachable(swap, monkeypatch):
     monkeypatch.setattr(client, "get_json", lambda *a, **k: None)
@@ -439,7 +445,8 @@ def test_the_url_hermes_passes_wins_and_becomes_the_active_shard(swap, calls):
     # not $LLAMA_SWAP_BASE_URL, and the read hooks must answer from that same shard
     swap.fetch_models(base_url="http://other-box:9/v1")
     assert calls == ["http://other-box:9/v1/models", "http://other-box:9/running"]
-    assert swap.get_model_context_length("strixite") == 262144
+    assert swap.get_model_context_length(ready_ids()[0]) == 262144   # a model whose window the
+                                                                     # captured server reported
 
 def test_context_length_probe_happens_once_at_first_use(swap, calls):
     # the sanctioned probe point; exactly one fetch, on first use only
@@ -564,7 +571,7 @@ def test_model_publishing_nothing_has_no_declared_vocabulary(swap):
     assert swap.supported_reasoning_efforts("gufo") is None
 
 def test_aux_prefers_an_already_loaded_model(swap):
-    assert swap.resolve_aux_model() == "strixite"       # the only ready model in the fixture
+    assert swap.resolve_aux_model() == ready_ids()[0]   # the fixture's one ready model
 
 def test_vision_default_comes_from_the_catalog(swap):
     assert swap.default_vision_model() == "halogen"
