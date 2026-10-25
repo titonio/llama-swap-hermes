@@ -97,7 +97,8 @@ def test_parse_running_requires_ready_state():
                                       {"model": "b", "state": "starting"}]}) == frozenset({"a"})
 
 
-@pytest.mark.parametrize("junk", [None, [], {}, {"running": None}, {"running": [1]}, "<html>"])
+@pytest.mark.parametrize("junk", [None, [], {}, {"running": None}, {"running": [1]}, {"running": 5},
+                                  {"running": True}, "<html>"])
 def test_parse_running_tolerates_junk_payloads(junk):
     assert parse_running(junk) == frozenset()
 

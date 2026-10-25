@@ -120,9 +120,17 @@ def parse_models(payload: Any) -> dict[str, ModelInfo]:
 
 
 def parse_running(payload: Any) -> frozenset[str]:
-    """The ids ``/running`` reports as ``ready`` — the engines actually serving."""
+    """The ids ``/running`` reports as ``ready`` — the engines actually serving.
+
+    Any other shape yields the empty set: ``/running`` is a best-effort read, so a
+    truthy non-list ``running`` (a proxy's ``{"running": 5}``) must read as "nothing
+    ready", never raise out of the one place that does HTTP.
+    """
+    entries = _dig(payload, "running")
+    if not isinstance(entries, list):
+        return frozenset()
     ready = set()
-    for entry in _dig(payload, "running") or ():
+    for entry in entries:
         if not isinstance(entry, dict) or entry.get("state") != "ready":
             continue
         model_id = str(entry.get("model") or "").strip()
