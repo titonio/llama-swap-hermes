@@ -1,9 +1,13 @@
-"""``client.get_json`` / URL helpers / env readers, with the opener stubbed.
+"""``client.get_json`` / URL helpers / env readers.
 
-Nothing here touches the network: the module-level opener is replaced per test,
-so the suite runs anywhere (the live server is Task 9's smoke script).
+Nothing here reaches outside this machine: the module-level opener is stubbed per
+test, and the two tests that need a real transport bind a loopback socket (the
+live server is Task 9's smoke script).
 """
 
+import http.server
+import socket
+import threading
 import urllib.error
 
 import client
@@ -93,3 +97,65 @@ def test_root_url_derives_server_root_from_base():
 
 def test_malformed_env_int_falls_back_to_default():
     assert client.env_int({"LLAMA_SWAP_CATALOG_TTL_S": "soon"}, "LLAMA_SWAP_CATALOG_TTL_S", 60) == 60
+
+
+def test_env_readers_fall_back_on_junk():
+    assert client.env_int({"LLAMA_SWAP_CATALOG_TTL_S": "soon"}, "LLAMA_SWAP_CATALOG_TTL_S", 60) == 60
+    assert client.env_int({}, "LLAMA_SWAP_CATALOG_TTL_S", 60) == 60  # absent → default, never 0
+    assert client.env_str({"LLAMA_SWAP_BASE_URL": "  http://h:1/v1/  "}, "LLAMA_SWAP_BASE_URL", "") == "http://h:1/v1/"
+
+
+def test_get_json_returns_none_on_unreachable_or_malformed_base():
+    # Regression guard for the try boundary: urllib raises ValueError for several
+    # of these at Request-construction time, so moving that construction back
+    # outside the try turns this red instead of leaking into a Hermes hook.
+    closed = socket.socket()
+    closed.bind(("127.0.0.1", 0))
+    closed_port = closed.getsockname()[1]
+    closed.close()
+
+    for base in (
+        f"http://127.0.0.1:{closed_port}/v1",  # nothing listening
+        "not a url",
+        "http://h:99999/v1",  # port out of range
+        "h:8080/v1",  # no scheme
+        "",
+        "ftp://h/v1",  # no urllib handler
+    ):
+        assert client.get_json(base, "/models", api_key="secret", timeout=0.5) is None, base
+
+
+def test_get_json_refuses_a_redirect_without_replaying_the_credential():
+    seen = []
+
+    class _Redirector(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append((self.path, self.headers.get("Authorization")))
+            if self.path == "/v1/models":
+                self.send_response(302)
+                self.send_header("Location", "/stolen")
+                self.end_headers()
+            else:
+                body = b'{"leaked": true}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        def log_message(self, *args):  # silence the stderr access log
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Redirector)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}/v1"
+        assert client.get_json(base, "/models", api_key="secret") is None
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    # Exactly one request, and it is the one that carried the credential: /stolen
+    # was never fetched, so there was no second request to replay it to.
+    assert seen == [("/v1/models", "Bearer secret")]
