@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import pathlib
 import sys
+from dataclasses import replace
 
 import pytest
 
@@ -18,10 +19,23 @@ import errors
 import providers
 from conftest import CORPUS, _info, _kwargs, stub_models
 from errors import classify_llama_swap_error
-from profile import build_profile, catalog_for
+from profile import build_profile, catalog_for, output_cap
 from test_fixtures import ready_ids
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def warm_swap(swap):
+    """``swap`` with its catalog already read once (the state a live session runs in).
+
+    The Task 6 hooks answer from the cache only, so a cold ``swap`` cannot show what
+    the server actually claimed; ``fetch_models`` is the setup-path read, never the
+    request path. ``test_cold_shard_declares_nothing`` pins the other half.
+    """
+    swap.fetch_models()
+    return swap
+
 
 # Gated to the stub: under a real Hermes checkout the registration below lands in
 # the process-wide registry and leaks into every other test that classifies as
@@ -132,6 +146,163 @@ def test_error_hook_delegates_and_never_raises(swap, monkeypatch):
     assert swap.classify_api_error(None, **_kwargs(case)) == classify_llama_swap_error(**_kwargs(case))
     monkeypatch.setattr(errors, "classify_llama_swap_error", lambda **kw: 1 / 0)
     assert swap.classify_api_error(None, status_code=400, error_code="", message="", body={}, model="x") is None
+
+
+# --- Task 6: declared budget and per-model vocabulary -------------------------
+#
+# The rule these pin is that a declared budget is a CAP the server can serve, never a
+# raise, and that a fact llama-swap did not state stays unstated: ``None`` means "the
+# server said nothing" (Hermes keeps its own default), ``()`` means "reasoning is off"
+# (no reasoning field may go on the wire), and the two must never collapse into one.
+
+
+def test_output_cap_is_a_cap_never_a_raise():
+    assert output_cap(262144, default_max=8192, floor=1024) == 8192   # big window keeps the default
+    assert output_cap(8192, default_max=8192, floor=1024) == 2048     # window // 4
+    assert output_cap(2048, default_max=8192, floor=1024) == 1024     # floor
+    assert output_cap(512, default_max=8192, floor=1024) == 1024      # floor, not window//4
+
+
+def test_unknown_window_declares_no_cap():
+    # Not a guess: Hermes' own reactive path (compress on overflow) is better served by
+    # no claim than by a number this plugin invented.
+    assert output_cap(None, default_max=8192, floor=1024) is None
+
+
+def _stated(info, **facts):
+    """Restate one fact on a stub ``_info``: its five core fields are already passed,
+    so ``_info(id, context_length=…)`` would hand ``ModelInfo`` the keyword twice.
+    """
+    return replace(info, **facts)
+
+
+def test_get_max_tokens_follows_the_models_window(warm_swap):
+    assert warm_swap.get_max_tokens("strixite") == 8192               # 262144 // 4 > default
+    stub_models(warm_swap, {"tiny": _stated(_info("tiny"), context_length=8192)})
+    assert warm_swap.get_max_tokens("tiny") == 2048                   # window // 4 wins
+    assert warm_swap.get_max_tokens("gufo") is None                   # never reported
+
+
+def test_cold_shard_declares_nothing(swap):
+    # Before the first probe every hot-path hook must decline without fetching: an
+    # invented budget or vocabulary is the failure mode this plugin exists to avoid.
+    assert swap.get_max_tokens("strixite") is None
+    assert swap.supported_reasoning_efforts("strixite") is None
+    assert swap.resolve_aux_model() == ""
+    assert swap.default_vision_model() is None
+    assert swap.default_reasoning_config("strixite") is None
+
+
+def test_hot_path_hooks_never_touch_the_network(warm_swap, calls):
+    before = len(calls)
+    warm_swap.supported_reasoning_efforts("halogen")
+    warm_swap.get_max_tokens("halogen")
+    warm_swap.resolve_aux_model()
+    warm_swap.default_vision_model()
+    warm_swap.default_reasoning_config("halogen")
+    assert len(calls) == before
+
+
+def test_supported_reasoning_efforts_is_per_model_not_server_wide(warm_swap):
+    assert warm_swap.supported_reasoning_efforts("halogen") == (
+        "none", "minimal", "low", "medium", "high", "xhigh", "max")
+    assert warm_swap.supported_reasoning_efforts("strixite")[-1] == "xhigh"
+
+
+def test_model_publishing_nothing_has_no_declared_vocabulary(warm_swap):
+    stub_models(warm_swap, {"quiet": _info("quiet")})     # no reasoning block at all
+    assert warm_swap.supported_reasoning_efforts("quiet") is None
+
+
+def test_reasoning_switched_off_declares_an_empty_vocabulary(warm_swap):
+    # The other half of the tri-state: the server SAID reasoning is off, so the
+    # transport must send no reasoning field. ``None`` here would keep the default
+    # vocabulary on the wire, which is the 400 this plugin is avoiding.
+    stub_models(warm_swap, {"flat": _stated(_info("flat"), reasoning_enabled=False, efforts=("low",))})
+    assert warm_swap.supported_reasoning_efforts("flat") == ()
+    assert warm_swap.default_reasoning_config("flat") is None
+
+
+def test_an_unknown_id_is_undeclared_not_disabled(warm_swap):
+    assert warm_swap.supported_reasoning_efforts("no-such-model") is None
+    assert warm_swap.get_max_tokens("no-such-model") is None
+
+
+# NOT gufo: the captured server publishes a full reasoning vocabulary for every model,
+# including gufo (verified against tests/fixtures/models.json). "Reports no capabilities"
+# and "reports no reasoning vocabulary" are different facts, and only the second is
+# unknown here — hence the stubbed ``quiet``/``flat`` models above.
+
+
+def test_aux_prefers_an_already_loaded_model(warm_swap):
+    assert warm_swap.resolve_aux_model() == ready_ids()[0]   # the fixture's one ready model
+
+
+def test_aux_for_a_vision_task_skips_a_model_that_denied_vision(warm_swap):
+    # ``vision=True`` is Hermes asking for a model that can take an image; an unknown
+    # vision (``None``) is not a yes, so it is not picked either. Server order breaks
+    # the tie, and a plain aux task still takes the first loaded model.
+    stub_models(warm_swap, {
+        "text": _info("text", loaded=True),                                # vision unknown
+        "eyes": _stated(_info("eyes"), loaded=True, vision=True),
+        "blind": _stated(_info("blind"), loaded=True, vision=False),
+    })
+    assert warm_swap.resolve_aux_model(vision=True) == "eyes"
+    assert warm_swap.default_vision_model() == "eyes"
+    assert warm_swap.resolve_aux_model() == "text"
+
+
+def test_a_model_that_denied_vision_is_not_the_vision_default(warm_swap):
+    stub_models(warm_swap, {"blind": _stated(_info("blind"), loaded=True, vision=False)})
+    assert warm_swap.default_vision_model() is None
+    assert warm_swap.resolve_aux_model(vision=True) == ""
+
+
+def test_vision_default_comes_from_the_catalog(warm_swap):
+    assert warm_swap.default_vision_model() == "halogen"
+
+
+def test_catalog_with_nothing_loaded_answers_no_aux(warm_swap):
+    stub_models(warm_swap, {"gufo": _info("gufo")})      # unloaded, no capabilities: nothing to pick
+    assert warm_swap.resolve_aux_model() == ""
+    assert warm_swap.default_vision_model() is None
+
+
+def test_a_cold_no_answer_is_not_cached_as_an_answer(swap):
+    # A cold shard must not poison the memo: aux/vision can resolve before the first
+    # context probe, and a cached "" would then outlive the warm-up by the whole TTL.
+    assert swap.resolve_aux_model() == ""
+    assert swap.default_vision_model() is None
+    swap.fetch_models()
+    assert swap.resolve_aux_model() == ready_ids()[0]
+    assert swap.default_vision_model() == "halogen"
+
+
+def test_aux_answer_is_cached_for_the_ttl(warm_swap, clock):
+    # providers/base.py:176 makes caching mandatory on this hook; the pick is a scan,
+    # so a TTL refresh must be what changes the answer, not the next call.
+    first = warm_swap.resolve_aux_model()
+    stub_models(warm_swap, {"other": _info("other", loaded=True)})
+    assert warm_swap.resolve_aux_model() == first        # still the cached pick
+    clock.advance(61)
+    assert warm_swap.resolve_aux_model() == "other"      # TTL expiry re-reads the shard
+
+
+# NOTE: these do not re-stub client.get_json — the swap fixture already filled the
+# cache, so a warm catalog would still answer. stub_models replaces the catalog itself.
+
+
+def test_unset_reasoning_defaults_to_medium_not_the_engine_ceiling(warm_swap):
+    assert warm_swap.default_reasoning_config("strixite") == {"enabled": True, "effort": "medium"}
+
+
+def test_unset_reasoning_stays_unset_for_a_model_without_medium(warm_swap):
+    # Never invent an effort a model did not publish: the server's own default is the
+    # honest answer when "medium" is not in its vocabulary.
+    thin = _stated(_info("thin"), efforts=("none", "minimal"), reasoning_enabled=True)
+    stub_models(warm_swap, {"thin": thin})
+    assert warm_swap.default_reasoning_config("thin") is None
+    assert warm_swap.default_reasoning_config(None) is None   # Hermes may pass no model
 
 
 # Mirrors the sibling's test_package_import_registers_provider

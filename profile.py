@@ -23,11 +23,11 @@ from typing import Any
 try:  # Hermes loads this file as a plugin-package submodule (providers/__init__.py:479-493)
     from . import client
     from . import errors
-    from .catalog import ModelInfo, capabilities_entry, fetch_catalog
+    from .catalog import ModelInfo, capabilities_entry, fetch_catalog, supported_efforts
 except ImportError:  # standalone import (tests, scripts): repo root on sys.path
     import client
     import errors
-    from catalog import ModelInfo, capabilities_entry, fetch_catalog
+    from catalog import ModelInfo, capabilities_entry, fetch_catalog, supported_efforts
 
 from providers.base import ProviderProfile
 
@@ -73,6 +73,22 @@ def _shard_for(profile: LlamaSwapProfile) -> dict[str, ModelInfo] | None:
     """
     entry = _cache_entry(_shard_url(profile))
     return None if entry is None else entry["infos"]
+
+
+def output_cap(window: int | None, default_max: int, floor: int) -> int | None:
+    """The output budget to declare for a model of ``window`` tokens; ``None`` declares nothing.
+
+    A cap, never a raise: the number exists so Hermes does not send an output budget the
+    loaded model cannot serve, so it is the smaller of the configured default and a
+    quarter of the window — the rest stays the prompt's. ``floor`` clamps from below:
+    a cap under it leaves compression no headroom, so it is the answer instead of a
+    smaller one. A ``None`` window means llama-swap never stated one (a model it has not
+    loaded), and "no claim" beats an invented one: Hermes' own reactive path — retry
+    smaller after an overflow — is left in charge.
+    """
+    if window is None:
+        return None
+    return max(floor, min(default_max, window // 4))
 
 
 def catalog_for(profile: LlamaSwapProfile, model: str) -> ModelInfo | None:
@@ -177,6 +193,8 @@ class LlamaSwapProfile(ProviderProfile):
         self.probe_timeout = probe_timeout
         self.min_output_tokens = min_output_tokens
         self.api_key = api_key
+        # {need_vision: (shard url, monotonic, pick)} — see :meth:`_pick`.
+        self._pick_memo: dict[bool, tuple[str, float, str]] = {}
 
     def warm(
         self,
@@ -240,6 +258,99 @@ class LlamaSwapProfile(ProviderProfile):
             shard = self.warm()
         info = shard.get(model)
         return None if info is None else info.context_length
+
+    def get_max_tokens(self, model: str | None) -> int | None:
+        """The output cap for ``model``'s own window, or ``None`` to declare nothing.
+
+        Replaces the base hook's flat ``default_max_tokens`` with a per-model number, and
+        reads the cache only: the transport asks per request, so a cold shard answers
+        "no claim" rather than probing (``get_model_context_length`` is the one warming
+        point). ``None`` is not a failure — it is the signal for the transport to keep
+        its own default, which is what Hermes did before this plugin existed.
+        """
+        info = catalog_for(self, model)
+        return output_cap(
+            None if info is None else info.context_length,
+            self.default_max_tokens,
+            self.min_output_tokens,
+        )
+
+    def supported_reasoning_efforts(self, model: str | None) -> tuple[str, ...] | None:
+        """``model``'s own published effort levels, filtered to Hermes' ladder.
+
+        Cache-only, and the tri-state stays three-valued on purpose: ``None`` — the model
+        said nothing, so the transport keeps its default vocabulary; ``()`` — llama-swap
+        said reasoning is OFF, so no reasoning field may go on the wire at all; a
+        non-empty tuple — clamp the requested effort onto these levels. The server-wide
+        list is not an answer here: the captured catalog gives ``strixite`` six levels
+        and the others seven, and forwarding a level one model 400s on is the bug.
+        ``catalog.supported_efforts`` owns the filtering and the ladder import.
+        """
+        info = catalog_for(self, model)
+        return None if info is None else supported_efforts(info)
+
+    def resolve_aux_model(self, *, vision: bool = False) -> str:
+        """A loaded model id for auxiliary tasks, or ``""`` so the caller falls through.
+
+        ``providers/base.py:176`` makes caching mandatory (this runs on client-resolution
+        paths) and forbids raising; :meth:`_pick` does both. Only a LOADED model is
+        offered: llama-swap starts an engine on demand, and a side task such as titling
+        has no business blocking on a model load.
+        """
+        return self._pick(need_vision=vision)
+
+    def default_vision_model(self) -> str | None:
+        """A loaded model that published vision, or ``None``.
+
+        Base (``providers/base.py:250-258``) does not mandate caching for this hook the
+        way it does for ``resolve_aux_model``, but it resolves on those same paths, so it
+        shares the same memo. ``None`` means no claim: the caller keeps its own chain
+        (user chat model, then the aggregator) rather than being sent an id that never
+        claimed it could take an image.
+        """
+        return self._pick(need_vision=True) or None
+
+    def default_reasoning_config(self, model: str | None = None) -> dict | None:
+        """What to send when ``agent.reasoning_effort`` is unset: medium, or nothing.
+
+        Medium rather than the engine's own published default (the captured catalog says
+        ``xhigh`` for every model), because a plugin must not spend thinking tokens the
+        user did not ask for. ``None`` — unset stays unset — when the model published no
+        reasoning vocabulary or not the medium level: claiming an effort a model did not
+        publish is the same invention this plugin refuses for context windows.
+        """
+        efforts = self.supported_reasoning_efforts(model)
+        if efforts and "medium" in efforts:
+            return {"enabled": True, "effort": "medium"}
+        return None
+
+    def _pick(self, *, need_vision: bool) -> str:
+        """First loaded model id, in server order, that can serve the ask; ``""`` when none.
+
+        Memoised per profile for ``catalog_ttl`` because ``resolve_aux_model`` must cache
+        (``providers/base.py:176``) and ``default_vision_model`` runs on the same paths;
+        the shard URL is part of the stamp so a credential-pool route switch invalidates
+        it. An unknown vision (``None``) does not qualify: it is the server not saying,
+        not a yes. Only a real pick is memoised — a ``""`` from a cold shard would
+        otherwise survive the whole TTL after the catalog warms, and re-scanning a dict
+        is cheaper than being wrong for a minute.
+        """
+        url = _shard_url(self)
+        now = time.monotonic()
+        cached = self._pick_memo.get(need_vision)
+        if cached is not None and cached[0] == url and now - cached[1] < self.catalog_ttl:
+            return cached[2]
+        picked = next(
+            (
+                info.id
+                for info in (_shard_for(self) or {}).values()
+                if info.loaded and (info.vision is True or not need_vision)
+            ),
+            "",
+        )
+        if picked:
+            self._pick_memo[need_vision] = (url, now, picked)
+        return picked
 
 
 def _env_positive_int(env: Mapping[str, str], name: str, default: int) -> int:
