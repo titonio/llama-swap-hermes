@@ -95,14 +95,11 @@ def test_root_url_derives_server_root_from_base():
     assert client.root_url("http://host:9000/api") == "http://host:9000/api"
 
 
-def test_malformed_env_int_falls_back_to_default():
-    assert client.env_int({"LLAMA_SWAP_CATALOG_TTL_S": "soon"}, "LLAMA_SWAP_CATALOG_TTL_S", 60) == 60
-
-
 def test_env_readers_fall_back_on_junk():
     assert client.env_int({"LLAMA_SWAP_CATALOG_TTL_S": "soon"}, "LLAMA_SWAP_CATALOG_TTL_S", 60) == 60
     assert client.env_int({}, "LLAMA_SWAP_CATALOG_TTL_S", 60) == 60  # absent → default, never 0
-    assert client.env_str({"LLAMA_SWAP_BASE_URL": "  http://h:1/v1/  "}, "LLAMA_SWAP_BASE_URL", "") == "http://h:1/v1/"
+    assert client.env_int({"LLAMA_SWAP_MIN_OUTPUT_TOKENS": "1024"}, "LLAMA_SWAP_MIN_OUTPUT_TOKENS", 1024) == 1024
+    assert client.env_str({"LLAMA_SWAP_BASE_URL": "  http://h.invalid:1/v1/  "}, "LLAMA_SWAP_BASE_URL", "") == "http://h.invalid:1/v1/"
 
 
 def test_get_json_returns_none_on_unreachable_or_malformed_base():
@@ -114,13 +111,16 @@ def test_get_json_returns_none_on_unreachable_or_malformed_base():
     closed_port = closed.getsockname()[1]
     closed.close()
 
+    # `.invalid` hosts (RFC 2606: never resolvable) so getaddrinfo answers at
+    # once — a bare "h" costs a real resolver round trip that `timeout` cannot
+    # bound, and DNS is not what this test is guarding.
     for base in (
         f"http://127.0.0.1:{closed_port}/v1",  # nothing listening
         "not a url",
-        "http://h:99999/v1",  # port out of range
-        "h:8080/v1",  # no scheme
+        "http://h.invalid:99999/v1",  # port out of range
+        "h.invalid:8080/v1",  # no scheme
         "",
-        "ftp://h/v1",  # no urllib handler
+        "ftp://h.invalid/v1",  # no urllib handler
     ):
         assert client.get_json(base, "/models", api_key="secret", timeout=0.5) is None, base
 
