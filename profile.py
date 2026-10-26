@@ -308,15 +308,20 @@ class LlamaSwapProfile(ProviderProfile):
         return None if info is None else supported_efforts(info)
 
     def resolve_aux_model(self, *, vision: bool = False) -> str:
-        """A loaded model id for auxiliary tasks, or ``""`` so the caller falls through.
+        """A model id for auxiliary tasks, or ``""`` so the caller falls through.
 
         ``providers/base.py:176`` makes caching mandatory (this runs on client-resolution
-        paths) and forbids raising; :meth:`_pick` does both. Only a LOADED model is
-        offered: llama-swap starts an engine on demand, and a side task such as titling
-        has no business blocking on a model load.
+        paths) and forbids raising; :meth:`_pick` does both. With no vision ask only a
+        LOADED model is offered: llama-swap starts an engine on demand, and a side task
+        such as titling has no business blocking on a model load. With ``vision=True`` the
+        vision ladder applies instead — unloaded capable model included — for the reason in
+        :meth:`default_vision_model`. No Hermes caller passes the kwarg today
+        (``agent/auxiliary_client.py:796`` calls it bare), so that branch is reachable only
+        through this signature; ``tests/test_profile.py`` pins it either way.
 
         Declining is free here, unlike :meth:`default_vision_model`: the hook is consulted
-        only under ``prefer_fast`` (``agent/auxiliary_client.py:783-796``), and ``""``
+        only under ``prefer_fast`` (``agent/auxiliary_client.py:783-796``, and only after the
+        live-catalog family match, so it is the second rung), and ``""``
         falls to ``profile.default_aux_model`` — base value ``""`` = "use the main model"
         (``providers/base.py:143-146``) — then to ``_API_KEY_PROVIDER_AUX_MODELS_FALLBACK``,
         which has no llama-swap entry.
@@ -332,11 +337,15 @@ class LlamaSwapProfile(ProviderProfile):
         way it does for ``resolve_aux_model``, but it resolves on those same paths, so it
         shares the same memo. The loaded filter is a preference here, not a gate: ``None``
         means ``vision_model = provider_vision_default or main_model``
-        (``agent/auxiliary_client.py:5613``) sends the image to the user's chat model,
-        which on llama-swap is usually text-only. Naming an unloaded image-capable model
-        instead costs one llama-swap auto-load — the server's normal job — so the ladder
-        is prefer-loaded, then any reported, then ``None``. Aux keeps the strict loaded
-        gate because its decline lands on "use main model" (see :meth:`resolve_aux_model`).
+        (``agent/auxiliary_client.py:5613``), which sends the image to the user's chat
+        model — unless Hermes already knows that model is text-only, which it does once our
+        own catalog refresh has published the fact: ``_main_model_supports_vision`` (:5525-5538)
+        gates the call at :5625 and skips this provider for the aggregator chain, the fork
+        base itself names at ``providers/base.py:258-259``. Naming an
+        unloaded image-capable model instead costs one llama-swap auto-load — the server's
+        normal job — so the ladder is prefer-loaded, then any reported, then ``None``. Aux
+        keeps the strict loaded gate because its decline lands on "use main model" (see
+        :meth:`resolve_aux_model`).
         """
         return self._pick(need_vision=True) or None
 

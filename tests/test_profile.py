@@ -315,6 +315,18 @@ def test_aux_for_a_vision_task_skips_a_model_that_denied_vision(warm_swap):
     assert warm_swap.resolve_aux_model() == "text"
 
 
+def test_a_vision_ask_takes_the_vision_ladder_not_the_loaded_gate(warm_swap):
+    # The ladder is chosen by NEED, not by which hook asked, so ``resolve_aux_model`` given a
+    # vision ask can name an UNLOADED model — deliberately: declining a vision ask is not
+    # free (see :meth:`default_vision_model`). No core caller passes the kwarg today, so the
+    # behaviour is pinned here rather than left to the docstring. A plain aux ask over the
+    # same catalog still declines, because its "" lands on "use the main model".
+    stub_models(warm_swap, {"eyes": _stated(_info("eyes"), vision=True)})   # image input, unloaded
+    assert warm_swap.resolve_aux_model(vision=True) == "eyes"
+    assert warm_swap.default_vision_model() == "eyes"
+    assert warm_swap.resolve_aux_model() == ""
+
+
 def test_a_model_that_denied_vision_is_not_the_vision_default(warm_swap):
     stub_models(warm_swap, {"blind": _stated(_info("blind"), loaded=True, vision=False)})
     assert warm_swap.default_vision_model() is None
