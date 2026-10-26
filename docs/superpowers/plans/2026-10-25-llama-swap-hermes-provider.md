@@ -892,7 +892,8 @@ Mirror `halogen-hermes/scripts/wire_smoke.py`: put the repo root on `sys.path`, 
 3. `get_max_tokens` and `supported_reasoning_efforts` for each id.
 4. One real completion with `reasoning_effort: "high"` and one with `"none"` against a **loaded** model, asserting from the response body that thinking was on and off (the `strix.thinking`/`reasoning_content` evidence proven during design).
 5. One deliberately oversized request (same shape as Task 4 Step 3) and print the status + body — this is how the error corpus is refreshed when llama-swap or its engines change.
-6. `fetch_account_usage()` — print the details lines, or "unavailable".
+6. One request naming a reasoning level this server cannot publish (`"ultra"` — Hermes-only, so it is in no `/v1/models` ladder) against the **loaded** model, printing status + body. Task 7's review established that Hermes recognises a reasoning-field rejection via `is_reasoning_field_rejection` (`agent/error_classifier.py:513-556`) and only then degrades the session; an unrecognised wording falls through to `_V_FORMAT_ERROR` (`:1209`) and aborts the turn instead. Nothing has ever measured which case llama-swap's body is. Targeting the loaded model keeps this from forcing a swap.
+7. `fetch_account_usage()` — print the details lines, or "unavailable".
 
 - [ ] **Step 2: Run it against the live server**
 
@@ -921,3 +922,9 @@ Sections, in this order: what it does (discovery, context windows, reasoning voc
 ```bash
 git add scripts/smoke.py README.md && git commit -m "docs: install, configuration and live verification for the llama-swap provider"
 ```
+
+**Review-derived checks for this task** (each found by an earlier task's review, none measurable offline):
+
+- If step 6's body does match `is_reasoning_field_rejection`, say so in the README's reasoning section; if it does not, that is a finding for `errors.py` — but a rule may only be added against a captured body, so record the body rather than guessing at a pattern.
+- Confirm on the live server that a vision ask picks up `halogen` (the only capable model, and loaded) rather than a text-only one, and that `resolve_aux_model` returns `""` (its guard rails, Task 6 F1/F2).
+- Confirm the real `output_cap` numbers for all four ids against `DEFAULT_MAX_TOKENS`/`MIN_OUTPUT_TOKENS`, and that an id whose window is unknown (`gufo`) yields `None` rather than a guess.
