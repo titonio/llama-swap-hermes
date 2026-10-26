@@ -821,11 +821,19 @@ git add profile.py tests/test_wire.py && git commit -m "feat: send reasoning_eff
 
 `STATS` is `tests/fixtures/metrics_stats.json` parsed; `usage_snapshot` (add to `tests/conftest.py`) calls `swap.fetch_account_usage()` with `client.get_json` serving that file for `/api/metrics/stats` and `{}` for `/api/version`.
 
+- [ ] **Step 0: Capture the fixture**
+
+`curl -sS http://192.168.31.7:8080/api/metrics/stats > tests/fixtures/metrics_stats.json` — a GET; the only
+live call outside Task 4's approved probe. Commit the payload verbatim, unedited, so the tests below are
+pinned to what the server actually said.
+
 ```python
 def test_usage_details_are_absolute_counters():
     lines = usage_details(STATS, {"version": "v264-9-g4a61d5"})
-    assert any("requests 200" in ln for ln in lines)
-    assert any("in 598,723" in ln and "out 144,784" in ln for ln in lines)
+    # Derived from the captured payload, never re-stated by hand (see the note after this block).
+    assert any(f"requests {STATS['total_requests']}" in ln for ln in lines)
+    assert any(f"in {STATS['total_input_tokens']:,}" in ln
+               and f"out {STATS['total_output_tokens']:,}" in ln for ln in lines)
     assert any("prompt p50" in ln and "gen p50" in ln for ln in lines)
 
 def test_no_quota_is_invented():
@@ -840,9 +848,18 @@ def test_unreachable_server_yields_no_snapshot(swap, monkeypatch):
     assert swap.fetch_account_usage() is None
 ```
 
+Why the numerals are derived rather than written out: `/api/metrics/stats` is a live counter set, so any
+literal copied into this plan is stale before the fixture is even captured — the values in the first draft
+of this task (`requests 200`, `in 598,723`, `out 144,784`) had already quadrupled by the time of the re-check
+that produced the shape above. Deriving them still tests the thing that matters, which is **which key each
+number is read from and how it is formatted**: a `usage_details` that pulls `total_output_tokens` for the
+`in` field, or drops the `{:,}` separators, goes red. Mutation-check both of those.
+
 - [ ] **Step 2: Implement**
 
 `fetch_account_usage` imports `AccountUsageSnapshot` lazily inside the function and returns `None` if the import fails (no Hermes ⇒ no snapshot type, and the hook is Hermes-only anyway). It uses `source="llama_swap_api"`, `title="llama-swap server"`, and its own timeout of 5 s — shorter than core's 10 s hook deadline, per the spec. `usage_details` formats with `{:,}` and skips any key the server omitted, so a future llama-swap that drops the histograms still renders counters.
+
+Verified against the real dispatcher (`agent/account_usage.py`), so nobody re-derives it: the hook is called as `profile.fetch_account_usage(base_url=…, api_key=…)` at `:726` — `read_only` is a `fetch_account_usage()` parameter for *built-in* fetchers and never reaches a profile, so the signature above is complete. The deadline is `PLUGIN_USAGE_HOOK_DEADLINE_S = 10.0` (`:712`), enforced by `run_bounded_sync`, which returns `None` to `/usage` on a timeout **but does not stop the worker thread** — which is exactly why the plugin needs its own 5 s socket timeout rather than relying on core's bound. Core also skips the thread entirely when `type(profile).fetch_account_usage is ProviderProfile.fetch_account_usage` (`:723`), i.e. overriding the hook is what makes the call happen at all. On the snapshot side (`agent/account_usage.py:42`): `provider`, `source` and `fetched_at` are required fields, `details` is a `tuple[str, ...]`, and `available` is a **property** (`bool(windows or details) and not unavailable_reason`) — never assign to it.
 
 - [ ] **Step 3: Run the tests to verify they pass**
 
