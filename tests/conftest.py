@@ -1,9 +1,10 @@
-"""Inject stub ``providers`` / ``providers.base`` modules before ``profile`` imports.
+"""Inject stub ``providers`` / ``providers.base`` / ``agent.account_usage`` modules.
 
-Hermes ships ``providers.base.ProviderProfile`` (a dataclass) and
-``providers.register_provider`` at runtime; the plugin must import cleanly
-without Hermes installed so its units run anywhere. When the real package IS
-importable (tests running inside a Hermes checkout), the stubs are skipped.
+Hermes ships ``providers.base.ProviderProfile`` (a dataclass),
+``providers.register_provider`` and ``agent.account_usage.AccountUsageSnapshot`` at
+runtime; the plugin must import cleanly without Hermes installed so its units run
+anywhere. When the real package IS importable (tests running inside a Hermes checkout),
+the stubs are skipped and the same tests run against the real types.
 
 Below the stub: the fixtures every plugin test shares. The stubbed server is the
 captured ``tests/fixtures`` payload, so no test resolves a host.
@@ -14,7 +15,8 @@ import pathlib
 import sys
 import time
 import types
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from datetime import datetime
 
 import pytest
 
@@ -74,6 +76,40 @@ except ImportError:
     sys.modules["providers"] = _providers
     sys.modules["providers.base"] = _base
 
+try:
+    import agent.account_usage  # noqa: F401
+except ImportError:
+    # Same deal as ``providers.base`` above: ``profile.fetch_account_usage`` builds
+    # Hermes' ``AccountUsageSnapshot`` (agent/account_usage.py:41), and the hook's own
+    # units must run offline. The stub restates only what the hook relies on — the
+    # required fields, ``details``/``windows``, and ``available`` as a READ-ONLY
+    # property, because assigning to it is the mistake this shape makes impossible.
+    # Under a Hermes checkout the real class is used and the same tests re-run on it.
+    _agent = types.ModuleType("agent")
+    # An empty package, not a module: `agent.error_classifier` must still fail to import
+    # offline, or the Hermes-only tests in test_errors/test_wire would run against
+    # nothing instead of skipping.
+    _agent.__path__ = []
+    _account_usage = types.ModuleType("agent.account_usage")
+
+    @dataclass(frozen=True)
+    class AccountUsageSnapshot:
+        provider: str
+        source: str
+        fetched_at: datetime
+        title: str = "Account limits"
+        windows: tuple = ()
+        details: tuple = ()
+        unavailable_reason: str | None = None
+
+        @property
+        def available(self):
+            return bool(self.windows or self.details) and not self.unavailable_reason
+
+    _account_usage.AccountUsageSnapshot = AccountUsageSnapshot
+    sys.modules["agent"] = _agent
+    sys.modules["agent.account_usage"] = _account_usage
+
 
 # After the stub block: profile.py imports providers.base.
 import client  # noqa: E402
@@ -83,6 +119,11 @@ from catalog import ModelInfo  # noqa: E402
 FIX = pathlib.Path(__file__).resolve().parent / "fixtures"
 
 CORPUS = json.loads((FIX / "errors.json").read_text())
+
+# The live counter set, captured verbatim from the server (Task 8 Step 0). Tests derive
+# every numeral from this dict rather than restating one: it is a running total, so any
+# literal copied in is stale the moment the fixture is recaptured.
+STATS = json.loads((FIX / "metrics_stats.json").read_text())
 
 
 def _kwargs(case):
@@ -175,6 +216,30 @@ def swap(calls):
     """
     plugin._CATALOG_CACHE.clear()
     return plugin.build_profile({})
+
+
+@pytest.fixture
+def usage_served(swap, monkeypatch):
+    """Repoint ``swap``'s server at the captured stats payload; returns the URLs served.
+
+    ``/api/version`` answers ``{}`` on purpose: the build line is the one thing a
+    snapshot must be able to do without, so a snapshot that needed it would fail here.
+    """
+    served = _Served()
+
+    def fake_get_json(base_url, path, *, api_key=None, timeout=None):
+        served.append(client.normalize_base_url(base_url) + path)
+        served.timeouts.append(timeout)
+        return STATS if path == "/api/metrics/stats" else {}
+
+    monkeypatch.setattr(client, "get_json", fake_get_json)
+    return served
+
+
+@pytest.fixture
+def usage_snapshot(swap, usage_served):
+    """``swap.fetch_account_usage()`` against the captured counters (see :func:`usage_served`)."""
+    return swap.fetch_account_usage()
 
 
 @pytest.fixture

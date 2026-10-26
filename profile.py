@@ -18,7 +18,8 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Mapping
-from typing import Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 try:  # Hermes loads this file as a plugin-package submodule (providers/__init__.py:479-493)
     from . import client
@@ -31,10 +32,19 @@ except ImportError:  # standalone import (tests, scripts): repo root on sys.path
 
 from providers.base import ProviderProfile
 
+if TYPE_CHECKING:  # annotation only: the snapshot type is Hermes' and is imported lazily
+    from agent.account_usage import AccountUsageSnapshot
+
 DEFAULT_CATALOG_TTL_S = 60
 DEFAULT_PROBE_TIMEOUT_S = 3
 DEFAULT_MAX_TOKENS = 8192
 DEFAULT_MIN_OUTPUT_TOKENS = 1024
+
+# Budget for the /usage read, deliberately under core's PLUGIN_USAGE_HOOK_DEADLINE_S
+# (10 s, agent/account_usage.py:712): that deadline stops *waiting*, it does not stop the
+# worker thread, so this is the timeout that actually ends the read. Shared by the two
+# GETs the hook makes, not granted to each.
+USAGE_TIMEOUT_S = 5.0
 
 # llama-swap does not check a key, but Hermes still builds an OpenAI client that wants
 # one; a placeholder keeps that shape without inventing a credential.
@@ -210,6 +220,59 @@ def classify_api_error(
         return None
 
 
+def _stated_number(value: object) -> int | float | None:
+    """``value`` when the server actually stated a number; ``None`` otherwise.
+
+    The distinction is the whole point: a missing key, a null or a string must render as
+    an omission, never as ``0`` — a zero is a claim about this server that the server
+    never made. ``bool`` is excluded because ``True`` would print as a count of one.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+# (stats key, line label) pairs. Absolute counters only: llama-swap publishes
+# server-lifetime totals and no quota, no reset time and no plan, so there is nothing
+# here to divide and nothing to render as a fraction.
+_USAGE_TOKEN_KEYS = (("total_input_tokens", "in"), ("total_output_tokens", "out"),
+                     ("total_cache_tokens", "cached"))
+# The histograms are speed distributions (prompt tokens/s, generated tokens/s), taken
+# from the same activity rows as the totals above — not latencies.
+_USAGE_SPEED_KEYS = (("prompt_histogram", "prompt"), ("gen_histogram", "gen"))
+
+
+def usage_details(stats: Mapping, version: Mapping) -> tuple[str, ...]:
+    """``/api/metrics/stats`` and ``/api/version`` as ``/usage`` lines; counters only.
+
+    Module-level and Hermes-free so the formatting is unit-testable without the snapshot
+    type. Every key is optional: a build that drops one (the histograms are nil when no
+    request reported a speed) loses its line rather than printing ``0`` for it, and an
+    empty pair of payloads returns ``()`` — "nothing stated", which the caller turns into
+    no snapshot at all. Nothing here is computed from the counters: no percentage, no
+    rate, no "used X of Y", because llama-swap states no quota to divide against.
+    """
+    lines: list[str] = []
+    requests = _stated_number(stats.get("total_requests"))
+    if requests is not None:
+        lines.append(f"requests {requests}")
+    tokens = [f"{label} {value:,}" for key, label in _USAGE_TOKEN_KEYS
+              if (value := _stated_number(stats.get(key))) is not None]
+    if tokens:
+        lines.append("tokens " + " • ".join(tokens))
+    speeds = [f"{label} p50 {hist['p50']:.1f} p95 {hist['p95']:.1f}"
+              for key, label in _USAGE_SPEED_KEYS
+              if isinstance(hist := stats.get(key), Mapping)
+              and _stated_number(hist.get("p50")) is not None
+              and _stated_number(hist.get("p95")) is not None]
+    if speeds:
+        lines.append("speed tok/s " + " • ".join(speeds))
+    build = str(version.get("version") or "").strip()
+    if build:
+        lines.append(f"build {build}")
+    return tuple(lines)
+
+
 class LlamaSwapProfile(ProviderProfile):
     """llama-swap route: every model fact is read from the server that serves it.
 
@@ -297,6 +360,66 @@ class LlamaSwapProfile(ProviderProfile):
         """
         infos = self.warm(base_url=base_url, api_key=api_key, timeout=timeout)
         return list(infos) or None
+
+    def fetch_account_usage(
+        self,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ) -> AccountUsageSnapshot | None:
+        """llama-swap's own counters as a Hermes snapshot; ``None`` when nothing was stated.
+
+        The second network read in this plugin and the only other one Hermes hands a
+        ``base_url`` to (``agent/account_usage.py:726``). It reads the server ROOT —
+        ``/api/metrics/stats`` and ``/api/version`` are not under ``/v1`` — and does not
+        retarget the catalog shard the way :meth:`fetch_models` does: this hook has no
+        catalog to keep consistent, and ``/usage`` reports the server it was pointed at.
+
+        Overriding this method is what makes core call it at all (``:723`` skips the
+        thread when a profile leaves the hook as the base no-op). The snapshot type is
+        Hermes', so it is imported lazily and a process without Hermes gets ``None`` —
+        the hook is Hermes-only and the plugin must not fail an import it does not need.
+
+        Bounded twice over, both bounds load-bearing: core waits at most 10 s but does not
+        stop the worker thread, so the socket timeout here is what actually ends the read,
+        and the two GETs share that budget instead of each getting the full width —
+        otherwise a stalled stats endpoint alone spends the whole deadline. A stats read
+        that eats the budget still returns its counters, just with no build line.
+
+        ``None`` on any failure, like :meth:`fetch_models`: an empty snapshot would render
+        a ``/usage`` header over no facts, which reads as a server that served nothing.
+        """
+        try:  # lazy: this module must import, and its units run, without Hermes
+            from agent.account_usage import AccountUsageSnapshot
+        except ImportError:
+            return None
+
+        root = client.root_url(base_url or self.base_url)
+        key = api_key or self.api_key or None
+        deadline = time.monotonic() + USAGE_TIMEOUT_S
+        stats = client.get_json(root, "/api/metrics/stats", api_key=key, timeout=USAGE_TIMEOUT_S)
+        if not isinstance(stats, Mapping):       # None, a list, an HTML proxy page
+            return None
+        # A spent budget means do not ask at all: 0 is not a timeout, it is a socket error.
+        remaining = deadline - time.monotonic()
+        version = (
+            client.get_json(root, "/api/version", api_key=key, timeout=remaining)
+            if remaining > 0
+            else {}
+        )
+        details = usage_details(stats, version if isinstance(version, Mapping) else {})
+        if not details:
+            return None
+        # `details` only, never `windows`: an AccountUsageWindow carries a used_percent,
+        # and llama-swap publishes no quota to make a percentage out of. `available` is a
+        # property of the type, satisfied by these lines.
+        return AccountUsageSnapshot(
+            provider=self.name,
+            source="llama_swap_api",
+            fetched_at=datetime.now(UTC),
+            title="llama-swap server",
+            details=details,
+        )
 
     def get_model_context_length(self, model: str) -> int | None:
         """The window llama-swap reported for ``model``, or ``None``.

@@ -16,9 +16,9 @@ import pytest
 import client
 import errors
 import providers
-from conftest import CORPUS, _info, _kwargs, _stated, stub_models
+from conftest import CORPUS, STATS, _info, _kwargs, _stated, stub_models
 from errors import classify_llama_swap_error
-from profile import build_profile, catalog_for, output_cap
+from profile import build_profile, catalog_for, output_cap, usage_details
 from test_fixtures import ready_ids
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -394,6 +394,108 @@ def test_unset_reasoning_stays_unset_for_a_model_without_medium(warm_swap):
     stub_models(warm_swap, {"thin": thin})
     assert warm_swap.default_reasoning_config("thin") is None
     assert warm_swap.default_reasoning_config(None) is None   # Hermes may pass no model
+
+
+# --- Task 8: llama-swap's own counters in /usage ------------------------------
+#
+# llama-swap publishes server-lifetime totals and no quota, no reset and no plan, so the
+# rule these pin is that every number shown is one the server stated, read from the key
+# it came from, and that nothing computed — no percentage, no "used X of Y" — appears.
+# Every numeral is DERIVED from ``STATS``: the fixture is a live counter set, so a
+# literal copied into a test is stale the next time the fixture is recaptured.
+
+
+def test_usage_details_are_absolute_counters():
+    version = {"version": "v264-9-g4a61d5"}
+    lines = usage_details(STATS, version)
+    # Derived from the captured payload, never re-stated by hand (see the note after this block).
+    assert any(f"requests {STATS['total_requests']}" in ln for ln in lines)
+    assert any(f"in {STATS['total_input_tokens']:,}" in ln
+               and f"out {STATS['total_output_tokens']:,}" in ln for ln in lines)
+    assert any("prompt p50" in ln and "gen p50" in ln for ln in lines)
+    # The same line pinned to its keys: the loose check above survives a prompt/gen swap
+    # and survives dropping the decimals; this one survives neither.
+    prompt, gen = STATS["prompt_histogram"], STATS["gen_histogram"]
+    assert any(f"prompt p50 {prompt['p50']:.1f} p95 {prompt['p95']:.1f}" in ln
+               and f"gen p50 {gen['p50']:.1f} p95 {gen['p95']:.1f}" in ln for ln in lines)
+    assert any(f"cached {STATS['total_cache_tokens']:,}" in ln for ln in lines)
+    assert any(version["version"] in ln for ln in lines)
+
+
+def test_no_quota_is_invented():
+    assert all("%" not in ln for ln in usage_details(STATS, {}))
+
+
+def test_usage_details_omits_a_counter_the_server_did_not_report():
+    # A zero is a claim, an omission is honest. llama-swap can drop a key between builds
+    # (a histogram is nil, not zero, when no request reported a speed), and printing 0
+    # for a key the server never sent would be inventing a fact about this server.
+    stripped = {key: value for key, value in STATS.items() if key != "gen_histogram"}
+    lines = usage_details(stripped, {})
+    assert not any("gen" in ln for ln in lines)
+    assert any("prompt p50" in ln for ln in lines)
+    # A key sent as null is the same omission (the Go side marshals a nil histogram).
+    assert not any("gen" in ln for ln in usage_details(dict(STATS, gen_histogram=None), {}))
+    assert usage_details({}, {}) == ()
+
+
+def test_snapshot_uses_details_not_windows(usage_snapshot, usage_served):
+    assert usage_snapshot.windows == ()
+    assert usage_snapshot.details and usage_snapshot.available
+    # The route Hermes hands the hook is the route it reads, and /api/* lives at the
+    # server ROOT, not under the /v1 OpenAI base (client.root_url).
+    assert usage_served == [
+        "http://192.168.31.7:8080/api/metrics/stats",
+        "http://192.168.31.7:8080/api/version",
+    ]
+
+
+def test_unreachable_server_yields_no_snapshot(swap, monkeypatch):
+    monkeypatch.setattr(client, "get_json", lambda *a, **k: None)
+    assert swap.fetch_account_usage() is None
+
+
+def test_a_server_that_states_nothing_yields_no_snapshot(swap, monkeypatch):
+    # The fetch_models rule again: "nothing to say" is None, never an empty snapshot —
+    # an empty one renders a /usage header over no facts, which reads as a server that
+    # served zero requests.
+    monkeypatch.setattr(client, "get_json", lambda *a, **k: {})
+    assert swap.fetch_account_usage() is None
+
+
+def test_usage_reads_share_one_budget(swap, clock, monkeypatch):
+    # Core bounds this hook at PLUGIN_USAGE_HOOK_DEADLINE_S (10 s) and does NOT stop the
+    # worker thread when it expires, so the plugin's own 5 s has to bound the whole hook
+    # — two GETs, one budget — or a slow stats read spends the entire deadline before
+    # the version read is even asked for.
+    asked: list[float] = []
+
+    def slow_stats(base_url, path, *, api_key=None, timeout=None):
+        asked.append(timeout)
+        if path.endswith("stats"):
+            clock.advance(4.5)                      # a stats read that eats the budget
+        return STATS if path.endswith("stats") else {}
+
+    monkeypatch.setattr(client, "get_json", slow_stats)
+    assert swap.fetch_account_usage() is not None
+    assert asked[0] == 5.0
+    assert asked[1] == pytest.approx(0.5)
+
+
+def test_a_spent_budget_skips_the_version_read(swap, clock, monkeypatch):
+    # A 0 timeout is not a timeout (urllib raises on it), so a spent budget means do not
+    # ask at all — and the counters still stand on their own without a build line.
+    asked: list[str] = []
+
+    def slow_stats(base_url, path, *, api_key=None, timeout=None):
+        asked.append(path)
+        clock.advance(5.0)                          # the whole budget, gone
+        return STATS
+
+    monkeypatch.setattr(client, "get_json", slow_stats)
+    snapshot = swap.fetch_account_usage()
+    assert asked == ["/api/metrics/stats"]
+    assert snapshot.available
 
 
 # Mirrors the sibling's test_package_import_registers_provider
