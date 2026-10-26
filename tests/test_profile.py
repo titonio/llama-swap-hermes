@@ -10,14 +10,13 @@ from __future__ import annotations
 import importlib.util
 import pathlib
 import sys
-from dataclasses import replace
 
 import pytest
 
 import client
 import errors
 import providers
-from conftest import CORPUS, _info, _kwargs, stub_models
+from conftest import CORPUS, _info, _kwargs, _stated, stub_models
 from errors import classify_llama_swap_error
 from profile import build_profile, catalog_for, output_cap
 from test_fixtures import ready_ids
@@ -226,13 +225,6 @@ def test_unknown_window_declares_no_cap():
     # Not a guess: Hermes' own reactive path (compress on overflow) is better served by
     # no claim than by a number this plugin invented.
     assert output_cap(None, default_max=8192, floor=1024) is None
-
-
-def _stated(info, **facts):
-    """Restate one fact on a stub ``_info``: its five core fields are already passed,
-    so ``_info(id, context_length=…)`` would hand ``ModelInfo`` the keyword twice.
-    """
-    return replace(info, **facts)
 
 
 def test_get_max_tokens_follows_the_models_window(warm_swap):

@@ -27,7 +27,7 @@ try:  # Hermes loads this file as a plugin-package submodule (providers/__init__
 except ImportError:  # standalone import (tests, scripts): repo root on sys.path
     import client
     import errors
-    from catalog import ModelInfo, capabilities_entry, fetch_catalog, supported_efforts
+    from catalog import EFFORT_LADDER_FALLBACK, ModelInfo, capabilities_entry, fetch_catalog, supported_efforts
 
 from providers.base import ProviderProfile
 
@@ -35,6 +35,10 @@ DEFAULT_CATALOG_TTL_S = 60
 DEFAULT_PROBE_TIMEOUT_S = 3
 DEFAULT_MAX_TOKENS = 8192
 DEFAULT_MIN_OUTPUT_TOKENS = 1024
+
+# llama-swap does not check a key, but Hermes still builds an OpenAI client that wants
+# one; a placeholder keeps that shape without inventing a credential.
+PLACEHOLDER_API_KEY = "llama-swap"
 
 # {normalized base URL: {"at": monotonic, "infos": {id: ModelInfo}}}
 # A failed probe is stored the same way — empty ``infos``, fresh ``at`` — which is what
@@ -106,6 +110,44 @@ def catalog_for(profile: LlamaSwapProfile, model: str) -> ModelInfo | None:
     """
     shard = _shard_for(profile)
     return None if shard is None else shard.get(model)
+
+
+def _nearest_weaker(effort: str, efforts: tuple[str, ...]) -> str:
+    """Fallback for Hermes' ``clamp_effort`` when Hermes is not importable (see :func:`_clamp_effort`).
+
+    Same policy, same refusal: verbatim when the level is published or is not a ladder level
+    at all, else the nearest weaker published level, else the weakest published one. ``none``
+    is skipped as a target so a clamp never switches thinking off on its own.
+    """
+    ladder = list(EFFORT_LADDER_FALLBACK)
+    published = [level for level in efforts if level in ladder]
+    if not published or effort not in ladder or effort in published:
+        return effort
+    rank = ladder.index
+    weaker = [level for level in published if level != "none" and rank(level) < rank(effort)]
+    if weaker:
+        return max(weaker, key=rank)
+    floors = [level for level in published if level != "none"]
+    return min(floors, key=rank) if floors else effort
+
+
+def _clamp_effort(effort: str, efforts: tuple[str, ...]) -> str | None:
+    """``effort`` clamped onto the levels ``efforts`` published; ``None`` when it cannot be said.
+
+    Never an escalation: an ask is answered with the level itself or a weaker one, so a
+    clamp cannot spend thinking tokens the user did not ask for. Hermes' own
+    ``clamp_effort`` is imported when present (lazily, the way ``catalog`` imports the
+    ladder) so this clamp and the entry clamp Hermes already applied are one policy, not
+    two vocabularies. Either way a level the model did not publish is dropped rather than
+    sent — Hermes passes bespoke names through untouched, and forwarding one is the 400.
+    """
+    try:  # lazy: this module must import, and its units run, without Hermes
+        from agent.reasoning_effort import clamp_effort
+    except ImportError:
+        clamped = _nearest_weaker(effort, efforts)
+    else:
+        clamped = clamp_effort(effort, efforts)
+    return clamped if clamped in efforts else None
 
 
 def _refresh_capabilities(profile: LlamaSwapProfile, infos: dict[str, ModelInfo]) -> None:
@@ -306,6 +348,68 @@ class LlamaSwapProfile(ProviderProfile):
         """
         info = catalog_for(self, model)
         return None if info is None else supported_efforts(info)
+
+    def build_api_kwargs_extras(
+        self, *, reasoning_config: dict | None = None, **context: Any
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Top-level ``reasoning_effort``, clamped to what this model published — or omitted.
+
+        The enforcement half of Task 6's declaration: this is the clamp that actually
+        reaches llama-swap on this chat-completions wire. The tri-state is kept, so
+        ``()`` (the server said reasoning is off) sends nothing reasoning-shaped, ``None``
+        (the server said nothing) passes the requested level through unclamped — the answer
+        that ran before this plugin existed — and a published ladder clamps onto itself.
+
+        An explicit disable is only sayable in a ladder that has a word for it:
+        ``{"enabled": False}`` sends ``"none"`` when the model published ``"none"`` and
+        omits the field otherwise, because inventing a level the server never stated is the
+        failure this plugin exists to avoid (Hermes' ``clamp_effort`` refuses ``"none"`` as
+        a degradation target for the same reason). Unset stays unset: ``default_reasoning_config``
+        is the hook that decides that case, and deciding it twice would spend thinking
+        tokens nobody asked for.
+
+        Never a budget: the transport merges the top-level dict in AFTER ``_apply_max_tokens``,
+        so a ``max_tokens`` here would overwrite a caller's compression or recovery budget.
+        Cache-only, like every hook on the request path. Hermes passes ``model``,
+        ``base_url``, ``session_id``, ``cache_scope_id``, ``supports_reasoning``,
+        ``ollama_num_ctx`` and friends; only ``model`` is ours, the rest is absorbed.
+        """
+        efforts = self.supported_reasoning_efforts(context.get("model"))
+        if efforts == ():                       # reasoning off: no reasoning field at all
+            return {}, {}
+        if not isinstance(reasoning_config, dict):
+            return {}, {}                       # unset stays unset
+        asked = str(reasoning_config.get("effort") or "").strip().lower()
+        if reasoning_config.get("enabled") is False or asked == "none":
+            level = "none" if efforts is None or "none" in efforts else None
+        elif not asked:
+            level = None                        # enabled with no level is not an ask
+        elif efforts is None:
+            level = asked                       # undeclared: Hermes' vocabulary is in charge
+        else:
+            level = _clamp_effort(asked, efforts)
+        return {}, ({"reasoning_effort": level} if level else {})
+
+    def build_extra_body(self, *, session_id: str | None = None, **context: Any) -> dict[str, Any]:
+        """Nothing, always. Every field this server honours is top level (see
+        :meth:`build_api_kwargs_extras`), unknown body fields are ignored here, and a body
+        field is not where a llama-swap quirk belongs. The explicit override — rather than
+        inheriting the base's ``{}`` — is the record of that decision, and the second of the
+        two places the no-budget rule is pinned. Signature mirrors the base hook: Hermes
+        calls it with ``session_id``, ``provider_preferences``, ``model``, ``base_url``,
+        ``reasoning_config`` and ``openrouter_min_coding_score``.
+        """
+        return {}
+
+    def build_client_kwargs_extras(self, **context: Any) -> dict[str, Any]:
+        """A key-shaped value for Hermes' client, and no timeout.
+
+        Hermes merges the result with ``setdefault`` (``agent/agent_runtime_helpers.py:2003``),
+        so a credential it already resolved always outranks the placeholder: this only fills
+        the gap for a server that checks no key at all. No ``timeout`` — Hermes' per-call
+        default is what has to absorb a model swap, and pinning one here would take that away.
+        """
+        return {"api_key": self.api_key or PLACEHOLDER_API_KEY}
 
     def resolve_aux_model(self, *, vision: bool = False) -> str:
         """A model id for auxiliary tasks, or ``""`` so the caller falls through.

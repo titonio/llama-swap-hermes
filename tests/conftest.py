@@ -14,6 +14,7 @@ import pathlib
 import sys
 import time
 import types
+from dataclasses import replace
 
 import pytest
 
@@ -109,6 +110,13 @@ def _info(model_id, **facts):
         reasoning_enabled=None,
         **facts,
     )
+
+
+def _stated(info, **facts):
+    """Restate one fact on a stub ``_info``: its five core fields are already passed,
+    so ``_info(id, context_length=…)`` would hand ``ModelInfo`` the keyword twice.
+    """
+    return replace(info, **facts)
 
 
 def stub_models(swap, infos):
