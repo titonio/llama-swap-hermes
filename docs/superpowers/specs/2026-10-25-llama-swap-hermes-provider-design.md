@@ -117,7 +117,7 @@ llama-swap side (running build `v264-9-g4a61d5`, checked live):
 | `GET /v1/models` | yes | per-model `context_length` + `context_window`, `capabilities` (`vision`, `function_calling`), `supported_parameters`, `architecture.input_modalities`, `meta.llamaswap.reasoning.{enabled,effort,efforts,tag}`, `meta.n_ctx`, `meta.llamaswap.aliases`, `status.value` = `loaded`/`unloaded`, `owned_by`, `name`, `description` |
 | `GET /running` | yes | `running[]` with `model`, `state` (`ready`), `proxy`, `ttl`, `cmd` |
 | `GET /api/version` | yes | `version`, `commit`, `build_date` |
-| `GET /api/metrics/stats` | yes | `total_requests`, `total_input_tokens`, `total_output_tokens`, `total_cache_tokens`, latency histograms |
+| `GET /api/metrics/stats` | yes | `total_requests`, `total_input_tokens`, `total_output_tokens`, `total_cache_tokens`, throughput histograms (`prompt_per_second` / `tokens_per_second` — a speed, not a latency; `internal/store/activity.go:130`, fed by `SELECT prompt_per_second, tokens_per_second FROM activity`) |
 | `GET /api/hardware`, `GET /api/performance` | yes | host CPU/GPU/VRAM inventory and telemetry |
 | `GET /health` | yes | literal `OK` |
 | `GET /metrics` | yes | Prometheus `llamaswap_*` |
@@ -198,7 +198,9 @@ llama-swap-hermes/
 ├── client.py            # HTTP GET helper (stdlib urllib), base URL + optional bearer
 ├── catalog.py           # /v1/models + /running → dict[model_id, ModelInfo], TTL cache
 ├── errors.py            # classify_api_error: llama-swap/llama.cpp specific branches
-├── conftest.py, tests/  # pytest; stubs providers.base when Hermes is absent
+├── tests/  # pytest; stubs providers.base when Hermes is absent, and puts the plugin root on
+            # sys.path itself (a root conftest.py would make pytest import the plugin package, which
+            # imports ``providers`` before the stub exists)
 └── scripts/smoke.py     # live check against a real llama-swap
 ```
 
@@ -315,10 +317,19 @@ fallback when nothing was passed. Single-server per profile home is the document
 assumption — llama-swap is one box, and sharding a cache with no URL-carrying
 reader would be invention.
 
-With no `LLAMA_SWAP_API_KEY` set, `build_client_kwargs_extras` supplies a
-placeholder key so Hermes' credential gate is satisfied (as `halogen-hermes`
-does); llama-swap ignores an Authorization header when no `apiKeys` are
-configured, and a real key is required when they are — stated in the README.
+With no `LLAMA_SWAP_API_KEY` set, `build_client_kwargs_extras` supplies a placeholder key
+so an OpenAI-shaped client can still be built (as `halogen-hermes` does); llama-swap
+ignores an Authorization header when no `apiKeys` are configured, and a real key is
+required when they are — stated in the README.
+
+**Corrected after live verification (Task 9): the placeholder does *not* satisfy Hermes'
+credential gate.** That gate reads the provider's credential env/config vars, not the
+kwargs a profile returns, so with `LLAMA_SWAP_API_KEY` unset Hermes refuses the provider
+before any request is made — measured: `hermes -z … --provider llama-swap` exits 1 with
+`No usable credentials found for provider 'llama-swap'. Set LLAMA_SWAP_API_KEY.`, and
+`doctor` skips the probe entirely (`hermes_cli/doctor_connectivity.py:179`). For an operator
+the variable is therefore **required, even though the value is ignored by the server**; the
+placeholder remains for callers that build a client without passing through that gate.
 
 ### Auxiliary and vision defaults
 
@@ -372,7 +383,9 @@ one.
 Env-driven, like the sibling plugin. `LLAMA_SWAP_BASE_URL` (default
 `http://192.168.31.7:8080/v1` — this machine's LAN target; any Hermes config
 surface, a `providers:` entry or an env override replaces it),
-`LLAMA_SWAP_API_KEY` (optional), and four tuning knobs:
+`LLAMA_SWAP_API_KEY` (required for Hermes to use the route at all, and ignored by
+llama-swap unless it is configured with `apiKeys` — see the correction above), and four
+tuning knobs:
 `LLAMA_SWAP_CATALOG_TTL_S` (60), `LLAMA_SWAP_PROBE_TIMEOUT_S` (3),
 `LLAMA_SWAP_DEFAULT_MAX_TOKENS` (8192), `LLAMA_SWAP_MIN_OUTPUT_TOKENS` (1024).
 Slow engine swaps are handled by Hermes' own `HERMES_API_TIMEOUT`, documented in

@@ -1,0 +1,5 @@
+name: llama-swap-provider
+kind: model-provider
+version: 0.1.0
+description: llama-swap — model discovery, context windows and reasoning vocabularies read from a llama-swap server
+author: dshagent
