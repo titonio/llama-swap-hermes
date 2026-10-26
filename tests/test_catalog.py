@@ -59,14 +59,29 @@ def test_reports_context_without_capabilities(infos):        # crucible
     assert infos["crucible"].vision is None and infos["crucible"].tools is None
 
 
-def test_capabilities_omit_unreported_fields(infos):         # gufo: nothing reported
+def test_capabilities_omit_unreported_fields(infos):         # gufo: reasoning is all it stated
     assert infos["gufo"].context_length is None
-    assert capabilities_entry(infos["gufo"]) == {}
+    assert capabilities_entry(infos["gufo"]) == {"supports_reasoning": True}
 
 
 def test_capabilities_entry_uses_hermes_field_names(infos):
     assert capabilities_entry(infos["halogen"]) == {
-        "supports_tools": True, "supports_vision": True, "context_window": 262144}
+        "supports_tools": True, "supports_vision": True, "context_window": 262144,
+        "supports_reasoning": True}
+
+
+@pytest.mark.parametrize("declared, expected", [
+    (True, True),        # the server said reasoning is on → Hermes may send the field
+    (False, False),      # the server said it is off → Hermes must strip it, not guess
+    (None, "unstated"),  # never reported → no key, so Hermes' own catalog answer stands
+])
+def test_the_reasoning_fact_keeps_all_three_states(declared, expected):
+    entry = capabilities_entry(ModelInfo(
+        id="gufo", context_length=None, vision=None, tools=None,
+        efforts=None, reasoning_enabled=declared))
+    assert ("supports_reasoning" in entry) is (expected != "unstated")
+    if expected != "unstated":
+        assert entry["supports_reasoning"] is expected
 
 
 def test_unknown_effort_levels_are_dropped_not_forwarded():

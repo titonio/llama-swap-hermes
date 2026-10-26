@@ -53,6 +53,17 @@ EXPECTED = {
         "hermes": "format_error",
         "plugin": {"reason": "context_overflow", "should_compress": True},
     },
+    # Two engines, two wordings for the same rejection (README "Reasoning rejections").
+    # Neither needs a plugin rule and neither has one; what they need is to stay checked,
+    # because the verdict is the retry mechanism, not an error message. This one is
+    # caught by core's proximity rule ("unsupported" next to the field name) inside
+    # _REASONING_PARAM_REJECTION.
+    "engine_reasoning_unsupported": {"hermes": "reasoning_mandatory", "plugin": None},
+    # And this one only by the structured `param` half of the same recogniser — the
+    # message alone, without "param": "reasoning_effort", is not recognised, which is why
+    # the whole body has to reach core in the message (see
+    # test_core_builds_a_message_that_recognises_the_reasoning_rejection).
+    "engine_reasoning_effort_param": {"hermes": "reasoning_mandatory", "plugin": None},
     # core is WRONG here: _MODEL_NOT_FOUND_PATTERNS has no "no router" wording and
     # _model_id_missing_known_prefix("strixite", "llama-swap") is False by design,
     # so a wrong model id classifies as retryable `unknown` and burns the whole
@@ -135,3 +146,45 @@ def test_hermes_still_answers_the_recorded_way(case, monkeypatch):
         provider="llama-swap", model="strixite", base_url="http://h.invalid:8080/v1",
     )
     assert classified.reason.value == EXPECTED[case]["hermes"]
+
+
+# The two captured reasoning rejections, found by what they are rather than by name so a
+# third wording cannot be silently left out of the check below.
+REASONING_CASES = tuple(
+    name for name in sorted(CORPUS)
+    if "reasoning_effort" in json.dumps(CORPUS[name]["body"])
+)
+
+
+def test_the_corpus_still_carries_both_reasoning_wordings():
+    # Not a check on Hermes — a check on the check. The test below is parametrised over
+    # this list, so if the corpus ever stops carrying the two wordings README records, it
+    # would pass by testing nothing, which is the hole this finding came from.
+    assert REASONING_CASES == ("engine_reasoning_effort_param", "engine_reasoning_unsupported")
+
+
+@pytest.mark.parametrize("case", REASONING_CASES)
+def test_core_builds_a_message_that_recognises_the_reasoning_rejection(case):
+    """``smoke.py`` and the README judge core's verdict on a message *we* format.
+
+    That is a mirror, and a mirror cannot fail: if the string core actually builds
+    differed from ours, the recorded ``reasoning_mandatory`` verdict above could be wrong
+    while every offline test stayed green. So build the message with core's own
+    ``_build_error_msg`` (``agent/error_classifier.py:1348``, the function the profile
+    stage feeds to ``is_reasoning_field_rejection``) and ask core whether it recognises
+    the reasoning rejection. Skipped offline, like the other Hermes-backed checks.
+    """
+    ec = pytest.importorskip("agent.error_classifier")
+    body = CORPUS[case]["body"]
+    message = ec._build_error_msg(_ApiStatusError(CORPUS[case]["status"], body), body)
+    assert ec.is_reasoning_field_rejection(message), message
+
+
+def test_a_message_for_another_400_is_not_mistaken_for_one():
+    # Without this the assertion above has no teeth: a recogniser that answered True for
+    # everything would pass it, and "core declines to invent a rejection here" is the
+    # other half of why no plugin rule was added.
+    ec = pytest.importorskip("agent.error_classifier")
+    body = CORPUS["engine_input_overflow"]["body"]
+    message = ec._build_error_msg(_ApiStatusError(400, body), body)
+    assert not ec.is_reasoning_field_rejection(message)

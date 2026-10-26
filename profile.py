@@ -177,7 +177,9 @@ def _refresh_capabilities(profile: LlamaSwapProfile, infos: dict[str, ModelInfo]
     The two steps are not atomic: a lookup landing between them sees an empty dict,
     which is Hermes' own "no profile claim" path — it answers from its catalog, the
     same answer it would have given before the refresh. A torn *entry* would be worse,
-    which is why entries are replaced whole under the cache lock instead.
+    which is why each one is built whole before ``update()`` and swapped by a single
+    dict assignment: that atomicity is the GIL's, not ``_CACHE_LOCK``'s, which this
+    function runs without.
     """
     entries = {
         model_id: entry
@@ -234,7 +236,10 @@ def _stated_number(value: object) -> int | float | None:
     counters, and Go cannot send one (``encoding/json`` refuses to marshal them), so the
     only way to see one is a proxy inventing it — and ``p50 nan`` is not a fact either.
     """
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+    # Only floats need the finiteness test: ``math.isfinite`` on an ``int`` larger than
+    # ``sys.float_info.max`` raises OverflowError, and every integer is finite already.
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or (isinstance(value, float) and not math.isfinite(value))):
         return None
     return value
 
@@ -366,8 +371,13 @@ class LlamaSwapProfile(ProviderProfile):
         it wins over ``$LLAMA_SWAP_BASE_URL`` and becomes the shard the read hooks
         answer from. The timeout default is the base hook's: this runs off the hot
         path (picker, setup, doctor), where a mid-swap server may take its time.
+
+        Forced, because this is the route an operator uses to ask what the server has:
+        answering it from a shard that is still inside the TTL would hide a model they
+        just added. The request-path hooks stay on the TTL branch, so the probe still
+        happens at most once per TTL per route.
         """
-        infos = self.warm(base_url=base_url, api_key=api_key, timeout=timeout)
+        infos = self.warm(base_url=base_url, api_key=api_key, timeout=timeout, force=True)
         return list(infos) or None
 
     def fetch_account_usage(
@@ -663,6 +673,11 @@ def build_profile(env: Mapping[str, str]) -> LlamaSwapProfile:
         # The wire accepts image parts; per-model truth is in model_capabilities.
         supports_vision=True,
         fallback_models=(),          # the ids are the server's to know
+        # Passed, not inherited: under Hermes ``api_mode`` is a dataclass field whose
+        # default lives in ``providers/base.py:47``, so a future change there would move
+        # this plugin's transport. The class annotation restates the same value, but for
+        # the stub's sake only (see LlamaSwapProfile).
+        api_mode="chat_completions",
         # Required under the test stub (no dataclass defaults), the base's own default
         # under Hermes. Filled in place by the first catalog refresh.
         model_capabilities={},

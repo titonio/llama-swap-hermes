@@ -166,6 +166,7 @@ def capabilities_entry(info: ModelInfo) -> dict[str, Any]:
         ("supports_tools", info.tools),
         ("supports_vision", info.vision),
         ("context_window", info.context_length),
+        ("supports_reasoning", info.reasoning_enabled),
     )
     return {key: value for key, value in reported if value is not None}
 

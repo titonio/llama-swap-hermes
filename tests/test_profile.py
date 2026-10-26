@@ -18,7 +18,13 @@ import errors
 import providers
 from conftest import CORPUS, STATS, _info, _kwargs, _stated, stub_models
 from errors import classify_llama_swap_error
-from profile import build_profile, catalog_for, output_cap, usage_details
+from profile import (
+    LlamaSwapProfile,
+    build_profile,
+    catalog_for,
+    output_cap,
+    usage_details,
+)
 from test_fixtures import ready_ids
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -58,6 +64,26 @@ def test_identity_fields():
 
 def test_base_url_env_override():
     assert build_profile({"LLAMA_SWAP_BASE_URL": "http://box:8080/v1/"}).base_url == "http://box:8080/v1"
+
+
+def test_api_mode_is_pinned_by_the_constructor_not_inherited(monkeypatch):
+    # The class annotation restates the value, it does not pin it: under Hermes ``api_mode``
+    # is a dataclass field whose default lives in ``providers/base.py:47``, so a future
+    # change there would move this plugin's transport while the annotation still read
+    # ``chat_completions``. Only the kwarg this constructor passes is a promise, which is
+    # what the spy below measures — and it is what an ``api_mode=`` deletion turns red,
+    # in the offline suite and in a Hermes checkout alike.
+    base = LlamaSwapProfile.__mro__[1]
+    seen = {}
+    real_init = base.__init__
+
+    def spy(self, **kwargs):
+        seen.update(kwargs)
+        real_init(self, **kwargs)
+
+    monkeypatch.setattr(base, "__init__", spy)
+    assert build_profile({}).api_mode == "chat_completions"
+    assert seen["api_mode"] == "chat_completions"
 
 
 def test_env_knob_reaches_the_profile():
@@ -162,7 +188,9 @@ def test_capabilities_refreshed_in_place_on_the_registered_profile(swap):
     assert swap.model_capabilities is caps                   # mutated in place, never rebound
     assert caps["halogen"]["supports_vision"] is True
     assert caps["halogen"]["context_window"] == 262144
-    assert "gufo" not in caps                                # nothing reported → no entry
+    # gufo reports no window, no vision and no tools, but it does state that reasoning is
+    # enabled, so it is described by that one claim rather than not at all.
+    assert caps["gufo"] == {"supports_reasoning": True}
 
 
 def test_capabilities_refresh_drops_a_model_the_server_stopped_reporting(swap, clock, monkeypatch):
@@ -183,6 +211,55 @@ def test_ttl_expiry_triggers_a_second_fetch(swap, calls, clock):
     clock.advance(61)
     swap.fetch_models()
     assert len(calls) > n
+
+
+def test_asking_for_the_model_list_probes_even_inside_the_ttl(swap, monkeypatch):
+    # ``fetch_models`` is the picker / ``hermes model`` / doctor route: it is the one
+    # thing an operator uses to ask what the server has, so a shard that is still
+    # inside the TTL must not be allowed to hide a model they just added. The probe
+    # count is the proof — an id list alone could be served by a lucky cache.
+    probes = []
+
+    def serving(model_ids):
+        def get_json(base_url, path, *args, **kwargs):
+            probes.append(path)
+            return {"data": [{"id": mid, "context_length": 1024} for mid in model_ids]}
+        return get_json
+
+    monkeypatch.setattr(client, "get_json", serving(["first"]))
+    assert swap.fetch_models() == ["first"]
+    assert len(probes) == 2                      # one probe: /models, then /running
+    monkeypatch.setattr(client, "get_json", serving(["added-afterwards"]))
+    assert swap.fetch_models() == ["added-afterwards"]      # the clock never moved
+    assert len(probes) == 4
+
+
+def test_read_hooks_stay_cache_only_after_a_forced_probe(swap, calls):
+    # The other half of the ruling: forcing the list is safe only because the hooks
+    # Hermes calls per turn still answer from the shard, however fresh or stale it is.
+    swap.fetch_models()
+    probes = len(calls)
+    assert swap.get_model_context_length(ready_ids()[0]) == 262144
+    assert swap.get_max_tokens("strixite") == 8192
+    assert swap.supported_reasoning_efforts("strixite") is not None    # declared vocabulary
+    assert len(calls) == probes
+
+
+def test_a_failed_forced_probe_is_cached_like_any_other(swap, monkeypatch):
+    # Forcing must not turn a dead server into one bounded wait per hook call: the
+    # failure is stored, and the read path is served from that stored absence.
+    probes = []
+
+    def dead(*args, **kwargs):
+        probes.append(1)
+        return None
+
+    monkeypatch.setattr(client, "get_json", dead)
+    assert swap.fetch_models() is None
+    assert len(probes) == 1
+    assert swap.get_model_context_length(ready_ids()[0]) is None
+    assert swap.get_max_tokens("strixite") is None
+    assert len(probes) == 1
 
 
 def test_catalog_for_answers_from_the_cache_only(swap):
@@ -460,6 +537,16 @@ def test_a_counter_that_is_not_a_number_is_omitted_not_coerced():
         dict(STATS, total_requests=float("nan")), {}))
     assert not any("prompt" in ln for ln in usage_details(
         dict(STATS, prompt_histogram={"p50": float("inf"), "p95": 1.0}), {}))
+
+
+def test_a_number_too_big_for_a_float_is_still_a_stated_counter():
+    # ``math.isfinite(10**400)`` raises ``OverflowError``, so a finiteness test applied
+    # to every number would crash ``/usage`` over a value the docstring promises is
+    # optional. Go cannot marshal one, but a proxy can, and a count is still a count.
+    huge = 10 ** 400
+    lines = usage_details(dict(STATS, total_requests=huge), {})
+    assert any(ln == f"requests {huge}" for ln in lines)
+    assert any(ln.startswith("tokens in ") for ln in lines)      # the read completes
 
 
 def test_snapshot_uses_details_not_windows(usage_snapshot, usage_served):
