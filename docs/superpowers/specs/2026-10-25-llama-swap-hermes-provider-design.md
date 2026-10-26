@@ -117,7 +117,7 @@ llama-swap side (running build `v264-9-g4a61d5`, checked live):
 | `GET /v1/models` | yes | per-model `context_length` + `context_window`, `capabilities` (`vision`, `function_calling`), `supported_parameters`, `architecture.input_modalities`, `meta.llamaswap.reasoning.{enabled,effort,efforts,tag}`, `meta.n_ctx`, `meta.llamaswap.aliases`, `status.value` = `loaded`/`unloaded`, `owned_by`, `name`, `description` |
 | `GET /running` | yes | `running[]` with `model`, `state` (`ready`), `proxy`, `ttl`, `cmd` |
 | `GET /api/version` | yes | `version`, `commit`, `build_date` |
-| `GET /api/metrics/stats` | yes | `total_requests`, `total_input_tokens`, `total_output_tokens`, `total_cache_tokens`, latency histograms |
+| `GET /api/metrics/stats` | yes | `total_requests`, `total_input_tokens`, `total_output_tokens`, `total_cache_tokens`, throughput histograms (`prompt_per_second` / `tokens_per_second` — a speed, not a latency; `internal/store/activity.go:130`, fed by `SELECT prompt_per_second, tokens_per_second FROM activity`) |
 | `GET /api/hardware`, `GET /api/performance` | yes | host CPU/GPU/VRAM inventory and telemetry |
 | `GET /health` | yes | literal `OK` |
 | `GET /metrics` | yes | Prometheus `llamaswap_*` |
