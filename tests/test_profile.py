@@ -439,6 +439,22 @@ def test_usage_details_omits_a_counter_the_server_did_not_report():
     assert usage_details({}, {}) == ()
 
 
+def test_a_counter_that_is_not_a_number_is_omitted_not_coerced():
+    # ``isinstance(True, int)`` is True in Python, so a gate that only asked "is this a
+    # number?" would print `requests 1` for a server that sent a boolean — a claim about
+    # this server that the server never made. A digit string is the same trap sideways:
+    # it is not what the endpoint's own type says the field is, and a value that has to be
+    # guessed at is not a counter. Both must render as an omission.
+    lie = dict(STATS, total_requests=True, total_input_tokens="2434114")
+    lines = usage_details(lie, {})
+    assert not any(ln.startswith("requests") for ln in lines)
+    assert not any(" in " in ln for ln in lines)
+    assert any(" out " in ln for ln in lines)          # the honest keys still render
+    # Inside a histogram the same rule applies, where a coercion would print a speed of 1.0.
+    assert not any("gen" in ln for ln in usage_details(
+        dict(STATS, gen_histogram={"p50": True, "p95": 1.0}), {}))
+
+
 def test_snapshot_uses_details_not_windows(usage_snapshot, usage_served):
     assert usage_snapshot.windows == ()
     assert usage_snapshot.details and usage_snapshot.available
