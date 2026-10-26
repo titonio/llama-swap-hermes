@@ -15,6 +15,7 @@ Hermes at module scope.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections.abc import Mapping
@@ -44,6 +45,9 @@ DEFAULT_MIN_OUTPUT_TOKENS = 1024
 # (10 s, agent/account_usage.py:712): that deadline stops *waiting*, it does not stop the
 # worker thread, so this is the timeout that actually ends the read. Shared by the two
 # GETs the hook makes, not granted to each.
+# shortcut: the bound is per socket operation (urllib sets a socket timeout, so a server
+# that trickles bytes resets it on every recv), not on wall-clock per read. Upgrade to an
+# explicit deadline check between recv batches only if a server is seen stalling /usage.
 USAGE_TIMEOUT_S = 5.0
 
 # llama-swap does not check a key, but Hermes still builds an OpenAI client that wants
@@ -225,9 +229,12 @@ def _stated_number(value: object) -> int | float | None:
 
     The distinction is the whole point: a missing key, a null or a string must render as
     an omission, never as ``0`` — a zero is a claim about this server that the server
-    never made. ``bool`` is excluded because ``True`` would print as a count of one.
+    never made. ``bool`` is excluded because ``True`` would print as a count of one. A
+    non-finite float is excluded for the same reason as a string: ``NaN``/``Inf`` are not
+    counters, and Go cannot send one (``encoding/json`` refuses to marshal them), so the
+    only way to see one is a proxy inventing it — and ``p50 nan`` is not a fact either.
     """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return None
     return value
 

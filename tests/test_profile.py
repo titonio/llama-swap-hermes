@@ -448,16 +448,28 @@ def test_a_counter_that_is_not_a_number_is_omitted_not_coerced():
     lie = dict(STATS, total_requests=True, total_input_tokens="2434114")
     lines = usage_details(lie, {})
     assert not any(ln.startswith("requests") for ln in lines)
-    assert not any(" in " in ln for ln in lines)
-    assert any(" out " in ln for ln in lines)          # the honest keys still render
+    assert not any(f"in {STATS['total_input_tokens']:,}" in ln for ln in lines)
+    assert any(f"out {STATS['total_output_tokens']:,}" in ln for ln in lines)  # honest keys remain
     # Inside a histogram the same rule applies, where a coercion would print a speed of 1.0.
     assert not any("gen" in ln for ln in usage_details(
         dict(STATS, gen_histogram={"p50": True, "p95": 1.0}), {}))
+    # A non-finite float is the same class of lie: Go cannot marshal one, so seeing `p50 nan`
+    # would mean something between here and the server invented it.
+    assert not any("requests" in ln for ln in usage_details(
+        dict(STATS, total_requests=float("nan")), {}))
+    assert not any("prompt" in ln for ln in usage_details(
+        dict(STATS, prompt_histogram={"p50": float("inf"), "p95": 1.0}), {}))
 
 
 def test_snapshot_uses_details_not_windows(usage_snapshot, usage_served):
     assert usage_snapshot.windows == ()
     assert usage_snapshot.details and usage_snapshot.available
+    # The identity fields are what /usage prints and what core keys its cache by, so they
+    # are part of the contract, not decoration: `provider` is the registered slug (pinned
+    # at test_profile.py:51), and a naive `fetched_at` would age wrongly against a UTC stamp.
+    assert (usage_snapshot.provider, usage_snapshot.source) == ("llama-swap", "llama_swap_api")
+    assert usage_snapshot.title == "llama-swap server"
+    assert usage_snapshot.fetched_at.tzinfo is not None
     # The route Hermes hands the hook is the route it reads, and /api/* lives at the
     # server ROOT, not under the /v1 OpenAI base (client.root_url).
     assert usage_served == [
@@ -477,6 +489,40 @@ def test_a_server_that_states_nothing_yields_no_snapshot(swap, monkeypatch):
     # served zero requests.
     monkeypatch.setattr(client, "get_json", lambda *a, **k: {})
     assert swap.fetch_account_usage() is None
+
+
+def test_a_version_read_that_fails_keeps_the_counters(swap, monkeypatch):
+    # get_json's failure shape is None, so the version read can come back empty while the
+    # counters stand: the build line is optional, the snapshot is not. This is the ordinary
+    # partial failure (stats is the heavier read), and it must not blank /usage.
+    monkeypatch.setattr(client, "get_json",
+                        lambda base_url, path, **kw: STATS if path.endswith("stats") else None)
+    assert swap.fetch_account_usage().details == usage_details(STATS, {})
+
+
+def test_no_hermes_snapshot_type_means_no_snapshot(swap, usage_served, monkeypatch):
+    # The hook is Hermes-only, so a missing account_usage module is a decline, not an error:
+    # raising here would surface inside core's /usage path. None in sys.modules makes the
+    # import itself fail the way an absent module does.
+    monkeypatch.setitem(sys.modules, "agent.account_usage", None)
+    assert swap.fetch_account_usage() is None
+
+
+def test_profile_imports_with_no_agent_module_present(monkeypatch):
+    """The lazy import above is a rule, not a style choice.
+
+    ``conftest`` installs a stand-in for ``agent.account_usage`` so the hook's units run
+    offline — which also means hoisting that import to module scope would leave every other
+    test green while breaking the shipped rule that this plugin imports where Hermes'
+    account module does not exist. So load profile.py with every ``agent`` name absent.
+    """
+    for name in [n for n in sys.modules if n == "agent" or n.startswith("agent.")]:
+        monkeypatch.delitem(sys.modules, name)
+    spec = importlib.util.spec_from_file_location("profile_without_agent", ROOT / "profile.py")
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "profile_without_agent", module)
+    spec.loader.exec_module(module)          # ImportError if the snapshot type is hoisted
+    assert module.usage_details({}, {}) == ()
 
 
 def test_usage_reads_share_one_budget(swap, clock, monkeypatch):

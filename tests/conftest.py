@@ -94,13 +94,19 @@ except ImportError:
 
     @dataclass(frozen=True)
     class AccountUsageSnapshot:
+        # Field names AND declaration order mirror agent/account_usage.py:41-62 exactly
+        # (including the fields this hook never sets), so a test cannot pass by constructing
+        # positionally against a shape production does not have.
         provider: str
         source: str
         fetched_at: datetime
         title: str = "Account limits"
+        plan: str | None = None
         windows: tuple = ()
         details: tuple = ()
         unavailable_reason: str | None = None
+        identity: str | None = None
+        raw: dict | None = None
 
         @property
         def available(self):
