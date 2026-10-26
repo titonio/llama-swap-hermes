@@ -239,9 +239,11 @@ def _stated_number(value: object) -> int | float | None:
     return value
 
 
-# (stats key, line label) pairs. Absolute counters only: llama-swap publishes
-# server-lifetime totals and no quota, no reset time and no plan, so there is nothing
-# here to divide and nothing to render as a fraction.
+# (stats key, line label) pairs. Absolute counters only: llama-swap publishes no quota,
+# no reset time and no plan, so there is nothing here to divide and nothing to render as
+# a fraction. Not lifetime totals either — measured on the live server, three samples
+# minutes apart, ``total_requests`` rose while ``total_input_tokens`` fell, so these
+# track the activity rows the store still holds. Never render one as a bill or a rate.
 _USAGE_TOKEN_KEYS = (("total_input_tokens", "in"), ("total_output_tokens", "out"),
                      ("total_cache_tokens", "cached"))
 # The histograms are speed distributions (prompt tokens/s, generated tokens/s), taken

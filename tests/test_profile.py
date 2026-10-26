@@ -398,8 +398,9 @@ def test_unset_reasoning_stays_unset_for_a_model_without_medium(warm_swap):
 
 # --- Task 8: llama-swap's own counters in /usage ------------------------------
 #
-# llama-swap publishes server-lifetime totals and no quota, no reset and no plan, so the
-# rule these pin is that every number shown is one the server stated, read from the key
+# llama-swap publishes no quota, no reset and no plan (and its totals are the activity
+# rows the store still holds, not server lifetime — see the note on ``_USAGE_TOKEN_KEYS``),
+# so the rule these pin is that every number shown is one the server stated, read from the key
 # it came from, and that nothing computed — no percentage, no "used X of Y" — appears.
 # Every numeral is DERIVED from ``STATS``: the fixture is a live counter set, so a
 # literal copied into a test is stale the next time the fixture is recaptured.
