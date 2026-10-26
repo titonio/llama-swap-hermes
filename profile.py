@@ -398,6 +398,14 @@ class LlamaSwapProfile(ProviderProfile):
         two places the no-budget rule is pinned. Signature mirrors the base hook: Hermes
         calls it with ``session_id``, ``provider_preferences``, ``model``, ``base_url``,
         ``reasoning_config`` and ``openrouter_min_coding_score``.
+
+        One consequence worth naming: overriding ``build_api_kwargs_extras`` at all makes
+        ``handles_reasoning`` true (``agent/auxiliary_client.py:6674-6679``), which stops the
+        auxiliary path from adding its own nested ``extra_body.reasoning`` fallback
+        (``:6708-6711``). On this route reasoning is therefore expressed only as the
+        per-model top-level ``reasoning_effort`` we send, and ``auxiliary.<task>.reasoning_effort``
+        has no effect — correct for a server that ignores unknown body fields, but a decision,
+        not an accident.
         """
         return {}
 

@@ -190,11 +190,30 @@ def test_the_no_hermes_clamp_fallback_agrees_with_hermes():
 
     vocabularies = [("none", "minimal", "low", "medium"), ("none", "low"),
                     ("minimal", "low", "medium"), ("none",), ("low", "turbo", "ultra"),
-                    ("high", "max")]
+                    ("high", "max"), ()]
     mismatches = [(asked, levels, clamp_effort(asked, levels), _nearest_weaker(asked, levels))
                   for asked in (*EFFORT_LADDER, "turbo", "") for levels in vocabularies
                   if clamp_effort(asked, levels) != _nearest_weaker(asked, levels)]
     assert mismatches == []
+
+
+def test_the_hook_survives_the_input_shapes_hermes_could_actually_send(swap_wire):
+    """This runs per request, so an ``AttributeError`` here breaks the session, not a feature.
+
+    The transport and the aux path hand us ``None``, a ``{}``, or a dict; the model can be
+    missing from ``context`` entirely, and a level can arrive in whatever case a config file
+    was written in. Each is a real caller shape, not a fuzz case: an earlier mutant review
+    found all three pinned by nothing.
+    """
+    for config in ("not-a-dict", 7, ["enabled"], True):
+        assert swap_wire.build_api_kwargs_extras(reasoning_config=config, model="strixite") == ({}, {})
+    # No ``model`` kwarg at all, and an explicit ``None``: both mean "no per-model claim".
+    assert swap_wire.build_api_kwargs_extras(reasoning_config=None) == ({}, {})
+    assert swap_wire.build_api_kwargs_extras(reasoning_config=None, model=None) == ({}, {})
+    # A level that only differs by case still clamps, whatever the transport did first.
+    _, top = swap_wire.build_api_kwargs_extras(reasoning_config={"enabled": True, "effort": "HIGH"},
+                                               model="strixite")
+    assert top == {"reasoning_effort": "medium"}
 
 
 def test_the_client_key_is_the_placeholder_when_unset(swap_wire):
