@@ -890,7 +890,7 @@ Mirror `halogen-hermes/scripts/wire_smoke.py`: put the repo root on `sys.path`, 
 1. `GET /api/version` and `GET /v1/models` — print the build; assert ≥ 1 model.
 2. `build_profile(os.environ).fetch_models()` — print ids, each with `context_length` / `vision` / `tools` / efforts / loaded.
 3. `get_max_tokens` and `supported_reasoning_efforts` for each id.
-4. One real completion with `reasoning_effort: "high"` and one with `"none"` against a **loaded** model, asserting from the response body that thinking was on and off (the `strix.thinking`/`reasoning_content` evidence proven during design).
+4. One real completion with `reasoning_effort: "high"` and one with `"none"` against a **loaded** model — read the loaded id from `GET /running` at runtime, never hardcode one, and fail the run if nothing is ready (forcing an engine swap on a shared box is out of scope). Assert thinking on/off from what the loaded engine actually reports: measured on this server, `high` returns a non-empty `reasoning_content` with `completion_tokens_details.reasoning_tokens > 0`, and `none` returns **no `reasoning_content` key at all** with `reasoning_tokens = 0`. (`strix.thinking` was the design-phase evidence on one engine only; do not assume it across ladders.)
 5. One deliberately oversized request (same shape as Task 4 Step 3) and print the status + body — this is how the error corpus is refreshed when llama-swap or its engines change.
 6. One request naming a reasoning level this server cannot publish (`"ultra"` — Hermes-only, so it is in no `/v1/models` ladder) against the **loaded** model, printing status + body. Task 7's review established that Hermes recognises a reasoning-field rejection via `is_reasoning_field_rejection` (`agent/error_classifier.py:513-556`) and only then degrades the session; an unrecognised wording falls through to `_V_FORMAT_ERROR` (`:1209`) and aborts the turn instead. Nothing has ever measured which case llama-swap's body is. Targeting the loaded model keeps this from forcing a swap.
 7. `fetch_account_usage()` — print the details lines, or "unavailable".
@@ -908,10 +908,10 @@ tar cf - --exclude=./tests --exclude=./scripts --exclude=./docs --exclude=./.git
     --exclude='__pycache__' . \
   | (cd ~/.hermes/plugins/model-providers/llama-swap && tar xf -)
 hermes doctor
-hermes -z "reply with the single word ok" --provider llama-swap -m strixite
+hermes -z "reply with the single word ok" --provider llama-swap -m <the id /running reports ready>
 ```
 
-Expected: doctor lists `llama-swap` with a passing `/models` probe; the one-shot reply succeeds. If doctor reports the profile registered no `ProviderProfile`, `__init__.py`'s import fallback is wrong — fix Task 5 Step 4.
+Expected: doctor lists `llama-swap` with a passing `/models` probe; the one-shot reply succeeds. **Two measured preconditions:** `LLAMA_SWAP_API_KEY` must be set in the environment, or Hermes refuses the provider outright (`No usable credentials found for provider 'llama-swap'`, exit 1) and `doctor` shows no `llama-swap` row at all — the value is ignored by llama-swap but required by Hermes' credential gate. And the model must be one already loaded, per the no-swap rule above. If doctor reports the profile registered no `ProviderProfile`, `__init__.py`'s import fallback is wrong — fix Task 5 Step 4.
 
 - [ ] **Step 4: Write `README.md`**
 

@@ -212,12 +212,27 @@ That body **is** recognised by Hermes' `is_reasoning_field_rejection`
 (`agent/error_classifier.py:548`, consulted at `:1175`), measured against the
 captured body rather than assumed. So Hermes takes `_V_REASONING_MANDATORY` — it
 drops the reasoning field and retries once — instead of falling through to
-`_V_FORMAT_ERROR` (`:1211`) and aborting the turn. **No plugin rule is needed here and none was added**: `errors.py`
-claims only the wordings core gets wrong, and it gets this one right.
+`_V_FORMAT_ERROR` (`:1211`) and aborting the turn.
+
+The same probe against a different loaded engine — `strixite`, a build whose own
+vocabulary stops at `xhigh` — returns a **different shape**, which is the reason no
+wording rule belongs in this plugin:
+
+```
+HTTP 400
+{"error":{"message":"'reasoning_effort' is 'ultra'; supported: xhigh, high (= xhigh), medium, low, minimal (= low), none (thinking off)","type":"invalid_request_error","param":"reasoning_effort","code":null}}
+```
+
+The first body is caught by core's proximity rule (`unsupported` next to the field
+name); this one by its structured `param` recogniser — and the message on its own,
+without the `param` field, is **not** recognised. Two engines, two wordings, one
+generic mechanism each. `errors.py` claims only the wordings core gets wrong, and it
+gets both of these right, so **no plugin rule is needed here and none was added**.
 
 The same clamp normally keeps the level off the wire in the first place:
-`build_api_kwargs_extras` clamps onto the model's own published ladder, so on
-this server a request for `ultra` is sent as `max` (or weaker), never verbatim.
+`build_api_kwargs_extras` clamps onto the model's own published ladder, so on this
+server a request for `ultra` is sent as that model's ceiling — `max` for the three
+that publish it, `xhigh` for `strixite` — never verbatim.
 
 ## Troubleshooting
 
