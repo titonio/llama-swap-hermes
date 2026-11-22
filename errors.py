@@ -18,17 +18,22 @@ leaves them to core. ``engine_negative_max_tokens`` is misread by core but is
 unreachable from anything Hermes sends, so it is declined too (see below). Two
 rules are earned:
 
-* **Context overflow the built-in patterns miss.** The engine rejects an
-  over-long prompt with its own sentence (corpus case ``engine_input_overflow``,
-  captured live): *"the prompt does not fit: it is 360052 tokens and the context
-  is 262144, 97908 tokens over."* Core answers ``format_error`` — none of
-  ``_CONTEXT_OVERFLOW_PATTERNS`` occurs in that sentence ("the context is
-  262144" is not "context window", "prompt does not fit" is not "prompt is too
-  long") — so Hermes treats a recoverable overflow as a terminal client error:
-  it aborts the turn and walks the fallback chain instead of compressing and
-  retrying. The verdict is core's own ``_V_CONTEXT_OVERFLOW``
-  (``context_overflow`` + ``should_compress=True``), which is what core would
-  have said had it recognised the wording.
+* **Context overflow the built-in patterns miss.** Each engine rejects an
+  over-long prompt in its own words. Two of them dodged every
+  ``_CONTEXT_OVERFLOW_PATTERNS`` entry (corpus cases ``engine_input_overflow``
+  and ``engine_input_overflow_strixite``, both captured live): *"the prompt does
+  not fit: it is 360052 tokens and the context is 262144, 97908 tokens over."*
+  and *"the prompt is 281164 tokens; the context holds 262144 (prompt + at least
+  1 generated token)"*. Neither "the context is 262144" nor "context holds" is
+  "context window", and "prompt does not fit" is not "prompt is too long", so
+  core answers ``format_error`` and Hermes treats a recoverable overflow as a
+  terminal client error: it aborts the turn and walks the fallback chain instead
+  of compressing and retrying. A third engine, crucible, words it as "exceeds
+  the context window of 262144 tokens", which core already recognises — so it
+  gets no rule, because a rule that reproduced core's own verdict would be dead
+  code that also discarded the hints core attached. The verdict here is core's
+  own ``_V_CONTEXT_OVERFLOW`` (``context_overflow`` + ``should_compress=True``),
+  which is what core would have said had it recognised the wording.
 
 * **llama-swap's own dispatch failure.** A model id llama-swap has no router for
   comes back 404 with ``src: "llama-swap"`` and ``code: "not_found"`` (corpus
@@ -73,10 +78,23 @@ unexpected extra keyword arguments are absorbed by ``**_ignored``. Stdlib only.
 from __future__ import annotations
 
 # The engine's own overflow wording, matched on the lowercased message (corpus
-# case `engine_input_overflow`). One phrase on purpose: a broader marker
-# ("context", "tokens") would claim unrelated 400s and compress history that no
-# compaction can fix.
-_OVERFLOW_MARKERS: tuple[str, ...] = ("prompt does not fit",)
+# cases `engine_input_overflow` / `engine_input_overflow_strixite`). One phrase
+# per captured sentence, never a broader marker ("context", "tokens"): that would
+# claim unrelated 400s and compress history that no compaction can fix.
+#
+#   "prompt does not fit"  -- halogen: "the prompt does not fit: it is 360052
+#                             tokens and the context is 262144, 97908 tokens over."
+#   "context holds"        -- strixite: "the prompt is 281164 tokens; the context
+#                             holds 262144 (prompt + at least 1 generated token)"
+#
+# Both captured live at 400 against a 262144 window. A third engine, crucible,
+# words the same refusal as "exceeds the context window of 262144 tokens", which
+# core's own _CONTEXT_OVERFLOW_PATTERNS already recognises, so it needs no rule
+# here and gets none. Measured, not assumed: the strixite sentence came back
+# format_error (retryable=False, should_fallback=True) from the real
+# classify_api_error -- a recoverable overflow turned into a terminal client error
+# that aborts the turn instead of compressing and retrying.
+_OVERFLOW_MARKERS: tuple[str, ...] = ("prompt does not fit", "context holds")
 
 
 # llama-swap stamps `src` on envelopes it produced itself, as opposed to bodies

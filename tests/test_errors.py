@@ -53,6 +53,17 @@ EXPECTED = {
         "hermes": "format_error",
         "plugin": {"reason": "context_overflow", "should_compress": True},
     },
+    # A SECOND engine, the same rejection, entirely different words (captured live
+    # on strixite at 400/281164 tokens against the same 262144 window). core: still
+    # format_error — "the prompt is 281164 tokens; the context holds 262144" carries
+    # no _CONTEXT_OVERFLOW_PATTERNS entry either. This case is why the rule carries
+    # two markers instead of one: a corpus of wordings, not of engines, is the only
+    # way the single-marker version could look complete while one model in the fleet
+    # still aborted its turn instead of compressing.
+    "engine_input_overflow_strixite": {
+        "hermes": "format_error",
+        "plugin": {"reason": "context_overflow", "should_compress": True},
+    },
     # Two engines, two wordings for the same rejection (README "Reasoning rejections").
     # Neither needs a plugin rule and neither has one; what they need is to stay checked,
     # because the verdict is the retry mechanism, not an error message. This one is
@@ -67,8 +78,8 @@ EXPECTED = {
     # core is WRONG here: _MODEL_NOT_FOUND_PATTERNS has no "no router" wording and
     # _model_id_missing_known_prefix("strixite", "llama-swap") is False by design,
     # so a wrong model id classifies as retryable `unknown` and burns the whole
-    # retry budget instead of aborting and walking the fallback chain. This is the
-    # one divergence the corpus proves, so it is the one rule.
+    # retry budget instead of aborting and walking the fallback chain. One of the
+    # two divergences the corpus proves, and the source of the second rule.
     "swap_no_router": {
         "hermes": "unknown",
         "plugin": {"reason": "model_not_found", "retryable": False, "should_fallback": True},

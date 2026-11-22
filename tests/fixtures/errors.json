@@ -4,6 +4,7 @@
   "engine_chat_template": {"status": 400, "body": {"error": {"message": "render_chat (/src/serve/chat_template.cpp:230): check `last_query >= 0` failed: chat template: No user query found in messages.", "type": "invalid_request_error", "param": "messages", "code": null}}},
   "swap_no_router": {"status": 404, "body": {"src": "llama-swap", "error": {"message": "no router for requested model", "type": "invalid_request_error", "param": null, "code": "not_found"}}},
   "engine_input_overflow": {"status": 400, "body": {"error": {"message": "the prompt does not fit: it is 360052 tokens and the context is 262144, 97908 tokens over. Shorten the prompt, or raise the context (HALOGEN_CTX, and HALOGEN_ROPE_YARN for more than the native 262144).", "type": "invalid_request_error", "param": null, "code": null}}},
+  "engine_input_overflow_strixite": {"status": 400, "body": {"error": {"message": "the prompt is 281164 tokens; the context holds 262144 (prompt + at least 1 generated token)", "type": "invalid_request_error", "param": null, "code": null}}},
   "engine_reasoning_unsupported": {"status": 400, "body": {"error": {"message": "reasoning_effort 'ultra' unsupported; use minimal|low|medium|high|xhigh|max|none", "type": "invalid_request_error", "param": null, "code": null}}},
   "engine_reasoning_effort_param": {"status": 400, "body": {"error": {"message": "'reasoning_effort' is 'ultra'; supported: xhigh, high (= xhigh), medium, low, minimal (= low), none (thinking off)", "type": "invalid_request_error", "param": "reasoning_effort", "code": null}}}
 }
