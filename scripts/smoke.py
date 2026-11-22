@@ -69,6 +69,11 @@ import profile as plugin  # noqa: E402
 
 CHAT_TIMEOUT_S = 120
 GET_TIMEOUT_S = 15.0
+# Used only when the loaded model reports no window (and so has no declared cap).
+# Must stay above llama-swap's own minimum thinking budget (1280 measured on
+# v268-14-gea63ff), or the thinking-on check measures the server's gate instead
+# of this plugin's reasoning path.
+THINKING_BUDGET_FALLBACK = 2048
 # The same oversized prompt Task 4 Step 3 captured: far past any reported window,
 # so the engine's own rejection is what comes back.
 OVERSIZED_PROMPT = "the quick brown fox " * 90000
@@ -139,6 +144,33 @@ def _reasoning_tokens(body):
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _skipped_by(body):
+    """`usage.completion_tokens_details.reasoning_skipped_by`, or ``None``.
+
+    Newer llama-swap builds (measured: v268-14-gea63ff) answer 200 with thinking
+    silently *off* when ``max_tokens`` is below the server's own minimum thinking
+    budget, and name the reason here — ``min_thinking_tokens``.
+    """
+    usage = body.get("usage") if isinstance(body, dict) else None
+    details = usage.get("completion_tokens_details") if isinstance(usage, dict) else None
+    value = details.get("reasoning_skipped_by") if isinstance(details, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def _thinking_budget():
+    """The output budget Hermes itself sends on a turn: the plugin's declared cap.
+
+    Hermes starts its reserve-and-shorten recovery from ``get_max_tokens``, so that
+    number — not an arbitrarily small probe budget — is the shape that has to keep
+    thinking alive. A model with no reported window has no declared cap, and then
+    ``THINKING_BUDGET_FALLBACK`` stands in: still above the server-side thinking
+    gate measured on v268 (1280), so a pass here means thinking works, not that the
+    probe was too small to reach it.
+    """
+    cap = _swap.get_max_tokens(_state.get("loaded"))
+    return cap if isinstance(cap, int) and cap > 0 else THINKING_BUDGET_FALLBACK
+
+
 def check_build_and_models():
     version = client.get_json(ROOT, "/api/version", timeout=GET_TIMEOUT_S)
     build = str(version.get("version") or "") if isinstance(version, dict) else ""
@@ -201,19 +233,25 @@ def check_loaded():
 
 
 def check_thinking_on():
-    status, body = _chat({"reasoning_effort": "high"}, max_tokens=256)
+    budget = _thinking_budget()
+    status, body = _chat({"reasoning_effort": "high"}, max_tokens=budget)
     if status != 200:
-        return False, f"reasoning_effort=high -> HTTP {status}: {_snippet(body)}"
+        return False, f"reasoning_effort=high (max_tokens={budget}) -> HTTP {status}: {_snippet(body)}"
     message = _first_message(body)
     tokens = _reasoning_tokens(body)
     reasoning = str(message.get("reasoning_content") or "")
     if not (tokens or reasoning.strip()):
+        skipped = _skipped_by(body)
+        why = (f"; the server skipped thinking (reasoning_skipped_by={skipped!r}) — its "
+               f"min_thinking_tokens gate sits above max_tokens={budget}"
+               if skipped else "")
         return False, (f"reasoning_effort=high -> 200 but thinking is OFF "
-                       f"(reasoning_tokens={tokens}, reasoning_content={reasoning[:60]!r}): "
-                       f"{_snippet(body)}")
+                       f"(reasoning_tokens={tokens}, reasoning_content={reasoning[:60]!r})"
+                       f"{why}: {_snippet(body)}")
     content = str(message.get("content") or "").strip()
-    return True, (f"reasoning_effort=high -> 200, thinking ON (reasoning_tokens={tokens}, "
-                  f"reasoning_content={reasoning[:40]!r}), content={content[:40]!r}")
+    return True, (f"reasoning_effort=high (max_tokens={budget}) -> 200, thinking ON "
+                  f"(reasoning_tokens={tokens}, reasoning_content={reasoning[:40]!r}), "
+                  f"content={content[:40]!r}")
 
 
 def check_thinking_off():

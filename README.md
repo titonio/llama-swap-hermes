@@ -174,7 +174,11 @@ Consequences an operator should know:
 The running build this plugin was verified against is **`v264-9-g4a61d5`**
 (`GET /api/version`: `version v264-9-g4a61d5`, `commit 4a61d5e+`, build date
 `2026-10-17T23:05:34Z`). Reproduced from the design spec so a future llama-swap
-can be checked against it:
+can be checked against it. The four read endpoints and the `POST
+/v1/chat/completions` wire were re-verified unchanged on **`v268-14-gea63ff`**
+(build date `2026-10-31T21:27:40Z`); `/props` is still absent there, and the one
+behavioural change found — thinking silently skipped below a server-side minimum
+budget — is [documented below](#thinking-is-on-but-reasoning_content-is-empty):
 
 | Endpoint | Present in `v264-9-g4a61d5` | What it gives |
 |---|---|---|
@@ -260,6 +264,23 @@ non-empty but not the server's key means every request 401s, which Hermes maps a
 an auth failure with credential rotation. Set the real key in that case — the
 placeholder trick only works on a server that checks no key.
 
+**Thinking is on but `reasoning_content` is empty.** Since **v268** llama-swap
+enforces a per-request minimum thinking budget, and it enforces it *silently*: a
+request whose `max_tokens` is below it answers HTTP 200 with
+`usage.completion_tokens_details.reasoning_skipped_by: "min_thinking_tokens"` and
+no reasoning tokens at all — no error for Hermes' recovery to react to. Measured
+on `v268-14-gea63ff` with `reasoning_effort: "high"` against a loaded model:
+`max_tokens` 1279 → skipped, 1280 → thinking on (87 reasoning tokens, 240 chars
+of `reasoning_content`). Hermes' own turns start from the declared cap, which is
+`min(8192, max(1024, window // 4))`, so every reasoning model with a window of
+**5120 or more** is above the gate on its own. A reasoning model whose window is
+smaller lands at 1024–1279 and silently loses thinking; raise
+`LLAMA_SWAP_MIN_OUTPUT_TOKENS` (e.g. `1280`) to lift the floor. The plugin cannot
+read the gate — no endpoint publishes it — so this is an operator knob, never a
+value the plugin may invent. `scripts/smoke.py` measures the same budget Hermes
+sends (the plugin's declared cap), which is why its thinking check reports the
+server's skip verbatim instead of a false pass.
+
 **`/usage` works but the model-picker usage chip never renders.** This is a
 known core behaviour, not a bug here: overriding `fetch_account_usage` makes
 `has_account_usage` true (`agent/account_usage_cache.py:64`), so the model
@@ -307,6 +328,17 @@ Verbatim from the design spec's Open risks, plus the two measured in review:
 ```bash
 # 1. offline unit/integration suite (no network; Hermes-optional)
 python3 -m pytest tests -q
+
+# 1b. the same suite with Hermes' own types in scope — un-skips the ~13
+#     cross-checks (error classification against core, the wire transport).
+#     Conftest stubs `agent` when `agent.account_usage` cannot import (e.g. no
+#     httpx in the venv), and a stubbed `agent` hides `agent.error_classifier`
+#     for the whole session, so point PYTHONPATH at BOTH Hermes' source
+#     workspace and its site-packages:
+WS=$(ls -d ~/.hermes/installs/*/environments/*/workspace | head -1)
+SP=$(ls -d ~/.hermes/installs/*/environments/*/venv/lib/python*/site-packages | head -1)
+PYTHONPATH="$WS:$SP" python -m pytest tests -q   # `python` must have pytest;
+# Hermes' own runtime venv does not ship it — use any venv that does.
 
 # 2. live check against a real llama-swap — one line per check, non-zero on the first failure
 LLAMA_SWAP_BASE_URL=http://<host>:8080/v1 python3 scripts/smoke.py
